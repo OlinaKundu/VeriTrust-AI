@@ -1,0 +1,81 @@
+@import "tailwindcss";
+
+@theme {
+  --color-border: rgba(255, 255, 255, 0.08);
+  --color-background-dark: #070b13;
+  --color-card-dark: #0f1524;
+  --color-primary: #00f0ff;
+  --color-secondary: #ff007f;
+  --color-success: #39ff14;
+  --color-warning: #ffb700;
+  
+  --animate-glow: glow 2s ease-in-out infinite alternate;
+  --animate-pulse-slow: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  
+  @keyframes glow {
+    from {
+      box-shadow: 0 0 4px rgba(0, 240, 255, 0.2), 0 0 10px rgba(0, 240, 255, 0.1);
+    }
+    to {
+      box-shadow: 0 0 12px rgba(0, 240, 255, 0.5), 0 0 20px rgba(0, 240, 255, 0.3);
+    }
+  }
+}
+
+:root {
+  --background: #070b13;
+  --foreground: #e2e8f0;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+  overflow-x: hidden;
+}
+
+/* Glassmorphism panel styling */
+.glass-panel {
+  background: rgba(15, 21, 36, 0.7);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.glass-panel:hover {
+  border-color: rgba(0, 240, 255, 0.2);
+  box-shadow: 0 8px 32px 0 rgba(0, 240, 255, 0.05);
+}
+
+/* Cyberpunk terminal text styling */
+.glow-text-cyan {
+  text-shadow: 0 0 8px rgba(0, 240, 255, 0.4);
+}
+
+.glow-text-pink {
+  text-shadow: 0 0 8px rgba(255, 0, 127, 0.4);
+}
+
+.glow-text-green {
+  text-shadow: 0 0 8px rgba(57, 255, 20, 0.4);
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #070b13;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1f293d;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #00f0ff;
+}
