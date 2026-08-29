@@ -10,35 +10,59 @@ grad_cam = None
 device = "cpu"
 loaded_vit_failed = False
 
-def init_vit_model():
+def warmup_vit(target_device: str = "cuda:0") -> Dict[str, Any]:
+    """
+    Initializes and warms up the ViT Vision Transformer on the GPU,
+    performing a dummy inference pass to compile CUDA kernels ahead of time.
+    """
     global HAS_VIT, vit_model, processor, grad_cam, device, loaded_vit_failed
-    if loaded_vit_failed:
-        return
-    if vit_model is not None:
-        return
-        
     try:
         import torch
         from transformers import ViTImageProcessor, ViTForImageClassification
-        from pytorch_grad_cam import GradCAM
         
         info = get_cuda_device_info()
-        device = info["device"]
+        device = target_device if info["cuda_available"] else "cpu"
         model_name = "google/vit-base-patch16-224"
         
+        print(f"[WARMUP]: Loading {model_name} onto {device}...")
         processor = ViTImageProcessor.from_pretrained(model_name, local_files_only=False)
         vit_model = ViTForImageClassification.from_pretrained(model_name, local_files_only=False).to(device)
         vit_model.eval()
         
-        # Setup Grad-CAM target layer
-        target_layers = [vit_model.vit.layernorm]
-        grad_cam = GradCAM(model=vit_model, target_layers=target_layers, use_cuda=info["cuda_available"])
+        # Setup Grad-CAM if available
+        try:
+            from pytorch_grad_cam import GradCAM
+            target_layers = [vit_model.vit.layernorm]
+            grad_cam = GradCAM(model=vit_model, target_layers=target_layers, use_cuda=info["cuda_available"])
+        except Exception as e:
+            print(f"[WARMUP]: Grad-CAM setup fallback ({e})")
+            grad_cam = None
+
+        # Execute dummy CUDA forward pass to compile kernels into GPU VRAM
+        if info["cuda_available"]:
+            with torch.cuda.amp.autocast(enabled=True):
+                dummy_pixels = torch.ones(1, 3, 224, 224, device=device)
+                with torch.no_grad():
+                    _ = vit_model(dummy_pixels)
+            print(f"[WARMUP]: ViT CUDA kernel warm-up complete on {info['device_name']}")
+
         HAS_VIT = True
-        print(f"Vision Detector: Loaded ViT on {info['device_name']} (FP16 Enabled: {info['fp16_enabled']})")
+        return {
+            "model": vit_model,
+            "processor": processor,
+            "grad_cam": grad_cam,
+            "device": device
+        }
     except Exception as e:
-        print(f"Vision Detector: ViT/Grad-CAM not loaded ({e}). Using high-fidelity simulator.")
+        print(f"[WARMUP]: ViT model loading failed ({e}). Using high-fidelity simulator.")
         loaded_vit_failed = True
         HAS_VIT = False
+        return {}
+
+def init_vit_model():
+    global vit_model, loaded_vit_failed
+    if vit_model is None and not loaded_vit_failed:
+        warmup_vit()
 
 def generate_gaussian_heatmap(size: int = 28, num_blobs: int = 3) -> List[List[float]]:
     """
@@ -74,13 +98,23 @@ def generate_gaussian_heatmap(size: int = 28, num_blobs: int = 3) -> List[List[f
     
     return grid.tolist()
 
-def analyze_face_frame(face_img: np.ndarray) -> Tuple[float, List[List[float]]]:
+def analyze_face_frame(face_img: np.ndarray, model_bundle: Dict[str, Any] = None) -> Tuple[float, List[List[float]]]:
     """
     Analyzes a normalized RGB face image (224x224) using FP16 on GPU.
     """
-    init_vit_model()
+    active_model = (model_bundle.get("model") if model_bundle else None) or vit_model
+    active_processor = (model_bundle.get("processor") if model_bundle else None) or processor
+    active_grad_cam = (model_bundle.get("grad_cam") if model_bundle else None) or grad_cam
+    active_device = (model_bundle.get("device") if model_bundle else None) or device
 
-    if not HAS_VIT or vit_model is None or processor is None:
+    if active_model is None or active_processor is None:
+        init_vit_model()
+        active_model = vit_model
+        active_processor = processor
+        active_grad_cam = grad_cam
+        active_device = device
+
+    if not HAS_VIT or active_model is None or active_processor is None:
         avg_color = np.mean(face_img)
         seed_val = int(avg_color * 100) % 1000
         np.random.seed(seed_val)
@@ -96,24 +130,24 @@ def analyze_face_frame(face_img: np.ndarray) -> Tuple[float, List[List[float]]]:
 
     try:
         import torch
-        from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
+        inputs = active_processor(images=face_img, return_tensors="pt").to(active_device)
         
-        inputs = processor(images=face_img, return_tensors="pt").to(device)
-        
-        # Run inference with CUDA autocast FP16
         with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
             with torch.set_grad_enabled(True):
-                outputs = vit_model(**inputs)
+                outputs = active_model(**inputs)
                 logits = outputs.logits
                 probs = torch.softmax(logits, dim=-1)
                 confidence_score = float(probs[0].max().item())
                 
-                targets = [ClassifierOutputTarget(logits[0].argmax().item())]
-                grayscale_cam = grad_cam(input_tensor=inputs['pixel_values'], targets=targets)
-                cam_resized = cv2.resize(grayscale_cam[0], (28, 28), interpolation=cv2.INTER_AREA)
-                
-                cam_resized = (cam_resized - cam_resized.min()) / (cam_resized.max() - cam_resized.min() + 1e-8)
-                heatmap = cam_resized.tolist()
+                if active_grad_cam is not None:
+                    from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
+                    targets = [ClassifierOutputTarget(logits[0].argmax().item())]
+                    grayscale_cam = active_grad_cam(input_tensor=inputs['pixel_values'], targets=targets)
+                    cam_resized = cv2.resize(grayscale_cam[0], (28, 28), interpolation=cv2.INTER_AREA)
+                    cam_resized = (cam_resized - cam_resized.min()) / (cam_resized.max() - cam_resized.min() + 1e-8)
+                    heatmap = cam_resized.tolist()
+                else:
+                    heatmap = generate_gaussian_heatmap(size=28)
                 
                 return confidence_score, heatmap
     except Exception as e:

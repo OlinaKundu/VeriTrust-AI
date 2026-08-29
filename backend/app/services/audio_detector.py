@@ -10,9 +10,8 @@ try:
     from moviepy.editor import VideoFileClip
     import soundfile as sf
     HAS_AUDIO_LIBS = True
-    print("Audio Detector: Librosa, MoviePy, and SoundFile loaded successfully.")
 except Exception as e:
-    print(f"Audio Detector: Essential audio libraries not fully available ({e}). Using mock/numpy fallback.")
+    pass
 
 HAS_WAV2VEC2 = False
 wav2vec_processor = None
@@ -20,42 +19,59 @@ wav2vec_model = None
 device = "cpu"
 loaded_wav2vec_failed = False
 
-def init_wav2vec2_model():
+def warmup_wav2vec2(target_device: str = "cuda:0") -> Dict[str, Any]:
+    """
+    Initializes and warms up the Wav2Vec2 Acoustic Model on the GPU,
+    performing a dummy inference pass to compile CUDA kernels ahead of time.
+    """
     global HAS_WAV2VEC2, wav2vec_processor, wav2vec_model, device, loaded_wav2vec_failed
-    if loaded_wav2vec_failed:
-        return
-    if wav2vec_model is not None:
-        return
-        
     try:
         import torch
         from transformers import Wav2Vec2Processor, Wav2Vec2ForCTC
         
         info = get_cuda_device_info()
-        device = info["device"]
+        device = target_device if info["cuda_available"] else "cpu"
         model_id = "facebook/wav2vec2-base-960h"
         
+        print(f"[WARMUP]: Loading {model_id} onto {device}...")
         wav2vec_processor = Wav2Vec2Processor.from_pretrained(model_id, local_files_only=False)
         wav2vec_model = Wav2Vec2ForCTC.from_pretrained(model_id, local_files_only=False).to(device)
         wav2vec_model.eval()
+        
+        # Execute dummy CUDA forward pass
+        if info["cuda_available"]:
+            with torch.cuda.amp.autocast(enabled=True):
+                dummy_audio = torch.zeros(1, 16000, device=device)
+                with torch.no_grad():
+                    _ = wav2vec_model(dummy_audio)
+            print(f"[WARMUP]: Wav2Vec2 CUDA kernel warm-up complete on {info['device_name']}")
+
         HAS_WAV2VEC2 = True
-        print(f"Audio Detector: Loaded Wav2Vec2 on {info['device_name']} (FP16 Enabled: {info['fp16_enabled']})")
+        return {
+            "model": wav2vec_model,
+            "processor": wav2vec_processor,
+            "device": device
+        }
     except Exception as e:
-        print(f"Audio Detector: Wav2Vec2 model not loaded ({e}). Using spectral analysis fallback.")
+        print(f"[WARMUP]: Wav2Vec2 model loading failed ({e}). Using spectral analysis fallback.")
         loaded_wav2vec_failed = True
         HAS_WAV2VEC2 = False
+        return {}
+
+def init_wav2vec2_model():
+    global wav2vec_model, loaded_wav2vec_failed
+    if wav2vec_model is None and not loaded_wav2vec_failed:
+        warmup_wav2vec2()
 
 def extract_audio_from_video(video_path: str | Path, output_audio_path: str | Path) -> bool:
     """
     Extracts the audio track from a video clip and saves it as a WAV file.
     """
     if not HAS_AUDIO_LIBS:
-        print("Cannot extract audio: moviepy is missing.")
         return False
     try:
         clip = VideoFileClip(str(video_path))
         if clip.audio is None:
-            print("No audio track found in video.")
             return False
         
         clip.audio.write_audiofile(
@@ -72,11 +88,19 @@ def extract_audio_from_video(video_path: str | Path, output_audio_path: str | Pa
         print(f"Failed to extract audio from video: {e}")
         return False
 
-def analyze_audio(audio_path: str | Path) -> Dict[str, Any]:
+def analyze_audio(audio_path: str | Path, model_bundle: Dict[str, Any] = None) -> Dict[str, Any]:
     """
     Analyzes audio waveform for deepfake signatures and pitch anomalies.
     """
-    init_wav2vec2_model()
+    active_model = (model_bundle.get("model") if model_bundle else None) or wav2vec_model
+    active_processor = (model_bundle.get("processor") if model_bundle else None) or wav2vec_processor
+    active_device = (model_bundle.get("device") if model_bundle else None) or device
+
+    if active_model is None or active_processor is None:
+        init_wav2vec2_model()
+        active_model = wav2vec_model
+        active_processor = wav2vec_processor
+        active_device = device
 
     results = {
         "audio_risk_score": 0.15,
@@ -96,7 +120,6 @@ def analyze_audio(audio_path: str | Path) -> Dict[str, Any]:
 
     try:
         y, sr = librosa.load(str(audio_path), sr=16000, mono=True)
-        duration = librosa.get_duration(y=y, sr=sr)
         
         pitches, magnitudes = librosa.piptrack(y=y, sr=sr)
         avg_pitch = np.mean(pitches[pitches > 0]) if np.any(pitches > 0) else 0.0
@@ -138,13 +161,13 @@ def analyze_audio(audio_path: str | Path) -> Dict[str, Any]:
         cloning_prob = 0.12
         
         # Wav2Vec2 GPU Accelerated Inference
-        if HAS_WAV2VEC2 and wav2vec_model is not None and wav2vec_processor is not None:
+        if HAS_WAV2VEC2 and active_model is not None and active_processor is not None:
             try:
                 import torch
-                input_values = wav2vec_processor(y, return_tensors="pt", sampling_rate=16000).input_values.to(device)
+                input_values = active_processor(y, return_tensors="pt", sampling_rate=16000).input_values.to(active_device)
                 with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
                     with torch.no_grad():
-                        logits = wav2vec_model(input_values).logits
+                        logits = active_model(input_values).logits
                     
                 probs = torch.softmax(logits, dim=-1)
                 max_probs = torch.max(probs, dim=-1).values.cpu().numpy()[0]

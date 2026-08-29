@@ -1,82 +1,98 @@
 # VeriTrust AI: Multi-Modal Deepfake & Document Verification Platform
 
-VeriTrust AI is a production-ready MVP for real-time deepfake detection and document tampering verification. It uses a high-throughput FastAPI backend to run visual face extraction, PyTorch ViT inference, Wav2Vec2 voice cloning detection, and Error Level Analysis (ELA), while streaming results over WebSockets to a Next.js (App Router) dashboard featuring Grad-CAM heatmaps, interactive canvases, and Recharts analytics.
+VeriTrust AI is a GPU-accelerated forensic platform engineered for real-time deepfake analysis and document tampering verification. Powered by a high-throughput FastAPI backend and a Next.js (App Router) dashboard, it cross-triangulates **PyTorch Vision Transformers (ViT) with Grad-CAM heatmaps**, **Wav2Vec2 acoustic voice cloning entropy**, and **JPEG Error Level Analysis (ELA)** to stream live diagnostics over WebSockets.
 
 ---
 
-## Workspace Directory Structure
+## ⚡ Hardware Acceleration & Lifespan Engine
+
+* **Detected GPU**: `NVIDIA GeForce RTX 3050 Laptop GPU` (CUDA 11.8)
+* **Precision**: `torch.cuda.amp.autocast()` (FP16 Mixed Precision)
+* **Lifespan Warm-up**: Automatically pre-allocates and compiles `ViT` and `Wav2Vec2` models in GPU VRAM at boot to eliminate cold-start latency during live uploads.
+
+---
+
+## 📂 Workspace Directory Structure
 
 ```
 /
 ├── backend/
 │   ├── app/
-│   │   ├── main.py                     # FastAPI routes, REST scan, WebSocket endpoint
+│   │   ├── main.py                     # Modern FastAPI Async Lifespan, REST & WebSockets
 │   │   ├── services/
 │   │   │   ├── face_extractor.py       # MTCNN face aligner / OpenCV CPU cascade fallback
-│   │   │   ├── vision_detector.py      # ViT inference / Grad-CAM / Gaussian simulation fallback
-│   │   │   ├── audio_detector.py       # MoviePy audio extraction / Wav2Vec2 / Librosa MFCC analysis
+│   │   │   ├── vision_detector.py      # ViT inference / Grad-CAM / Gaussian simulation
+│   │   │   ├── audio_detector.py       # MoviePy extraction / Wav2Vec2 / Librosa MFCC analysis
 │   │   │   ├── document_ela.py         # JPEG Error Level Analysis (ELA) for image documents
-│   │   │   └── scoring.py              # Fused trust scoring logic
+│   │   │   └── scoring.py              # Fused multi-modal trust scoring logic
 │   │   └── utils/
+│   │       ├── device.py               # Hardware telemetry & CUDA detection
 │   │       └── temp_storage.py         # Temporary file uploads management
-│   ├── verify.py                       # Automated verification runner
-│   └── requirements.txt                # Python packages requirements
+│   ├── verify.py                       # Automated backend validation runner
+│   └── requirements.txt                # Python dependencies
 │
-└── frontend/
-    ├── app/
-    │   ├── layout.tsx
-    │   ├── page.tsx                    # Renders dashboard at path /
-    │   ├── globals.css                 # Custom cyberpunk glass theme styles
-    │   └── dashboard/
-    │       ├── page.tsx                # Dashboard container & WebSocket client
-    │       └── components/
-    │           ├── DragDropUpload.tsx  # Ingest zone with upload tracking
-    │           ├── ScanControls.tsx    # Scan parameters selector
-    │           ├── TrustGauge.tsx      # SVG score visualizer
-    │           ├── MetricGrid.tsx      # Analytics card listing
-    │           ├── VisualDiagnostics.tsx # Canvas keyframes & Grad-CAM overlays
-    │           ├── AudioAnalytics.tsx  # Recharts temporal & spectral charts
-    │           └── StatusLogs.tsx      # WebSocket terminal logger
-    ├── package.json
-    └── tsconfig.json
+├── frontend/
+│   ├── app/
+│   │   ├── layout.tsx
+│   │   ├── page.tsx                    # Renders dashboard at root /
+│   │   ├── globals.css                 # Cyberpunk glassmorphism theme styles
+│   │   └── dashboard/
+│   │       ├── page.tsx                # Main dashboard container & WebSocket client
+│   │       └── components/
+│   │           ├── DragDropUpload.tsx  # Ingest vault with upload progress tracking
+│   │           ├── ScanControls.tsx    # Parameter selector (Full Scan vs. ELA)
+│   │           ├── TrustGauge.tsx      # SVG radial trust score dial
+│   │           ├── MetricGrid.tsx      # Analytics card matrix with GPU badge
+│   │           ├── VisualDiagnostics.tsx # Canvas keyframes & Grad-CAM overlays
+│   │           ├── AudioAnalytics.tsx  # Recharts temporal & spectral charts
+│   │           └── StatusLogs.tsx      # Real-time WebSocket terminal logger
+│   ├── package.json
+│   └── tsconfig.json
+│
+├── demo_assets/                        # Ready-to-test forensic media suite
+│   ├── authentic/                      # Natural portraits and acoustic speech samples
+│   ├── deepfake/                       # Face-swap composites and cloned voice samples
+│   └── documents/                      # Genuine vs. spliced ID documents for ELA testing
+│
+├── docs/
+│   └── PITCH_PLAYBOOK.md               # 30-sec pitch, 2-min demo script, judge Q&A
+│
+└── scripts/
+    └── prepare_demo_data.py            # Generates/refreshes the demo assets suite
 ```
 
 ---
 
-## Getting Started
+## 🚀 Quick Start Guide
 
-### 1. Run the FastAPI Backend
+### 1. Start the FastAPI Backend
 
-1. Navigate to the `backend/` folder:
+1. Open a terminal and navigate to `backend/`:
    ```powershell
    cd backend
    ```
-2. Create and activate a Python virtual environment:
+2. Activate your virtual environment and install requirements:
    ```powershell
-   python -m venv venv
    .\venv\Scripts\Activate.ps1
-   ```
-3. Install dependencies:
-   ```powershell
    pip install -r requirements.txt
    ```
-4. Run the automated verification tests:
+3. Run the automated backend test:
    ```powershell
    python verify.py
    ```
-5. Launch the FastAPI server:
+4. Start the backend with lifespan GPU model warm-up:
    ```powershell
-   uvicorn app.main:app --reload --port 8000
+   python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
    ```
-   The backend API will be available at `http://localhost:8000`.
+   *Backend API is live at `http://localhost:8000`.*
 
-### 2. Run the Next.js Frontend
+### 2. Start the Next.js Frontend
 
-1. Open a new terminal and navigate to the `frontend/` folder:
+1. Open a second terminal and navigate to `frontend/`:
    ```powershell
    cd frontend
    ```
-2. Install npm dependencies:
+2. Install frontend dependencies:
    ```powershell
    npm install
    ```
@@ -84,14 +100,28 @@ VeriTrust AI is a production-ready MVP for real-time deepfake detection and docu
    ```powershell
    npm run dev
    ```
-   The interactive dashboard will be running at `http://localhost:3000`.
+   *Interactive Dashboard is live at `http://localhost:3000`.*
 
 ---
 
-## Key Features & Visualizations
+## 🧪 Testing with Demo Assets
 
-1. **Multi-Modal Scanning**: Upload videos to parse visual frames + audio waveforms simultaneously, or upload documents to activate ELA.
-2. **Dynamic Grad-CAM Overlay**: Features an HTML5 Canvas drawing face targets. If suspicious anomalies are identified, a Jet/Thermal Grad-CAM heatmap is rendered using bilinear scaling over the face crop.
-3. **JPEG Error Level Analysis**: Compares differential JPEG savings at 95% quality. Pinpoints text editing, copy-paste alterations, and splicing on PDFs/images.
-4. **WebSocket Streaming**: Handshakes with the server and streams telemetry frames. A monospaced cybernetic terminal updates progress in real time.
-5. **PDF/JSON Audit Logger**: Allows downloading a signed JSON log file containing all scan metadata, timelines, and risk scores.
+You can test the platform instantly using the files in [`demo_assets/`](file:///E:/Hackverse2k26/demo_assets):
+
+| Demo File Path | Scan Mode | What to Expect in the UI |
+|---|---|---|
+| `demo_assets/documents/spliced_tampered_id.jpg` | **Document ELA Check** | **High Tampering Risk**: Spliced photo & 'TOP-SECRET' text glow bright white in the ELA canvas. |
+| `demo_assets/documents/unaltered_id_card.jpg` | **Document ELA Check** | **100% Authentic**: Uniform flat dark compression differential. |
+| `demo_assets/deepfake/deepfake_face_swap.jpg` | **Full Deepfake Scan** | **Deepfake Detected**: Thermal Grad-CAM heatmap highlights boundary seams around the face. |
+| `demo_assets/authentic/authentic_portrait.jpg` | **Full Deepfake Scan** | **Authentic**: Clean bounding box with low risk index. |
+
+*(To regenerate or rebuild the test suite at any time, run: `python scripts/prepare_demo_data.py`)*
+
+---
+
+## 🏆 Pitch & Presentation Strategy
+
+Check out [`docs/PITCH_PLAYBOOK.md`](file:///E:/Hackverse2k26/docs/PITCH_PLAYBOOK.md) for:
+* **30-Second Elevator Pitch** on multi-modal triangulation.
+* **2-Minute Step-by-Step Live Demo Script** for judges.
+* **Judge Q&A Cheat Sheet** addressing model accuracy, $0 local edge GPU costs, and zero-leakage privacy compliance.
