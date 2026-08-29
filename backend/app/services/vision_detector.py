@@ -40,7 +40,7 @@ def warmup_vit(target_device: str = "cuda:0") -> Dict[str, Any]:
 
         # Execute dummy CUDA forward pass to compile kernels into GPU VRAM
         if info["cuda_available"]:
-            with torch.cuda.amp.autocast(enabled=True):
+            with torch.amp.autocast("cuda", enabled=True):
                 dummy_pixels = torch.ones(1, 3, 224, 224, device=device)
                 with torch.no_grad():
                     _ = vit_model(dummy_pixels)
@@ -131,8 +131,8 @@ def analyze_face_frame(face_img: np.ndarray, model_bundle: Dict[str, Any] = None
     try:
         import torch
         inputs = active_processor(images=face_img, return_tensors="pt").to(active_device)
-        
-        with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+        device_type = "cuda" if torch.cuda.is_available() else "cpu"
+        with torch.amp.autocast(device_type, enabled=torch.cuda.is_available()):
             with torch.set_grad_enabled(True):
                 outputs = active_model(**inputs)
                 logits = outputs.logits

@@ -1,3 +1,13 @@
+---
+title: VeriTrust AI
+emoji: 🛡️
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # VeriTrust AI: Multi-Modal Deepfake & Document Verification Platform
 
 VeriTrust AI is a GPU-accelerated forensic platform engineered for real-time deepfake analysis and document tampering verification. Powered by a high-throughput FastAPI backend and a Next.js (App Router) dashboard, it cross-triangulates **PyTorch Vision Transformers (ViT) with Grad-CAM heatmaps**, **Wav2Vec2 acoustic voice cloning entropy**, and **JPEG Error Level Analysis (ELA)** to stream live diagnostics over WebSockets.

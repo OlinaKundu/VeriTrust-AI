@@ -40,7 +40,7 @@ def warmup_wav2vec2(target_device: str = "cuda:0") -> Dict[str, Any]:
         
         # Execute dummy CUDA forward pass
         if info["cuda_available"]:
-            with torch.cuda.amp.autocast(enabled=True):
+            with torch.amp.autocast("cuda", enabled=True):
                 dummy_audio = torch.zeros(1, 16000, device=device)
                 with torch.no_grad():
                     _ = wav2vec_model(dummy_audio)
@@ -164,8 +164,8 @@ def analyze_audio(audio_path: str | Path, model_bundle: Dict[str, Any] = None) -
         if HAS_WAV2VEC2 and active_model is not None and active_processor is not None:
             try:
                 import torch
-                input_values = active_processor(y, return_tensors="pt", sampling_rate=16000).input_values.to(active_device)
-                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                device_type = "cuda" if torch.cuda.is_available() else "cpu"
+                with torch.amp.autocast(device_type, enabled=torch.cuda.is_available()):
                     with torch.no_grad():
                         logits = active_model(input_values).logits
                     

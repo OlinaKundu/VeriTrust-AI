@@ -73,9 +73,17 @@ export default function DragDropUpload({
     formData.append('file', file);
 
     try {
-      // Create XML Http Request to track upload progress
+      // Determine API URL (supports local dev on port 3000 and reverse-proxied production on HF Spaces)
+      let apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      if (apiUrl === undefined) {
+        if (typeof window !== 'undefined' && window.location.port === '3000') {
+          apiUrl = 'http://localhost:8000';
+        } else {
+          apiUrl = '';
+        }
+      }
       const xhr = new XMLHttpRequest();
-      xhr.open('POST', 'http://localhost:8000/api/v1/upload', true);
+      xhr.open('POST', `${apiUrl}/api/v1/upload`, true);
       
       xhr.upload.onprogress = (event) => {
         if (event.lengthComputable) {

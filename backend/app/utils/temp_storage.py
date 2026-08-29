@@ -3,7 +3,8 @@ import uuid
 import shutil
 from pathlib import Path
 
-TEMP_DIR = Path("E:/Hackverse2k26/backend/temp")
+# Base temp directory relative to backend root
+TEMP_DIR = Path(__file__).resolve().parent.parent.parent / "temp"
 
 def init_temp_dir():
     TEMP_DIR.mkdir(parents=True, exist_ok=True)

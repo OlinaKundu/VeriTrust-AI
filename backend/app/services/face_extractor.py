@@ -30,8 +30,25 @@ else:
 
 def extract_keyframes_and_faces(video_path: str | Path, max_frames: int = 10) -> List[Dict[str, Any]]:
     """
-    Extracts keyframes from a video file and detects/crops faces.
+    Extracts keyframes from a video or image file and detects/crops faces.
     """
+    file_path = Path(video_path)
+    suffix = file_path.suffix.lower()
+
+    # If input is a static image, process directly
+    if suffix in [".jpg", ".jpeg", ".png", ".webp", ".bmp"]:
+        img_bgr = cv2.imread(str(file_path))
+        if img_bgr is not None:
+            rgb_frame = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            bboxes, cropped_faces = detect_faces(rgb_frame)
+            return [{
+                "frame_index": 0,
+                "timestamp": 0.0,
+                "bounding_boxes": bboxes,
+                "image": rgb_frame,
+                "faces": cropped_faces
+            }]
+
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         print(f"Error opening video file: {video_path}")
