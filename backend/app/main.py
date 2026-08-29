@@ -186,7 +186,8 @@ async def run_pipeline_sync(
         fused = calculate_trust_score(
             visual_risk=res["tamper_score"],
             audio_risk=0.0,
-            spatial_anomaly=res["tamper_score"] * 0.8
+            spatial_anomaly=res["tamper_score"] * 0.8,
+            mode="ela"
         )
         return {
             "filename": original_filename,
@@ -271,7 +272,8 @@ async def run_ela_pipeline_ws(websocket: WebSocket, file_path: Path):
     fused = calculate_trust_score(
         visual_risk=res["tamper_score"],
         audio_risk=0.0,
-        spatial_anomaly=res["tamper_score"] * 0.8
+        spatial_anomaly=res["tamper_score"] * 0.8,
+        mode="ela"
     )
     
     await websocket.send_json({
@@ -384,7 +386,8 @@ async def run_full_pipeline_ws(websocket: WebSocket, file_path: Path, models: Di
     fused = calculate_trust_score(
         visual_risk=avg_vision_risk,
         audio_risk=audio_risk,
-        spatial_anomaly=avg_spatial_anomaly
+        spatial_anomaly=avg_spatial_anomaly,
+        mode="full"
     )
     await asyncio.sleep(0.3)
 

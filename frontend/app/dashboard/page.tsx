@@ -37,7 +37,15 @@ export default function Dashboard() {
 
   // Fetch Hardware status from FastAPI on mount
   useEffect(() => {
-    fetch('http://localhost:8000/api/v1/system/gpu')
+    let apiUrl = process.env.NEXT_PUBLIC_API_URL;
+    if (apiUrl === undefined) {
+      if (typeof window !== 'undefined' && window.location.port === '3000') {
+        apiUrl = 'http://localhost:8000';
+      } else {
+        apiUrl = '';
+      }
+    }
+    fetch(`${apiUrl}/api/v1/system/gpu`)
       .then((res) => res.json())
       .then((data) => {
         if (data && data.device_name) {
@@ -90,7 +98,16 @@ export default function Dashboard() {
     setResults(null);
     setErrorMessage(null);
 
-    const wsUrl = `ws://localhost:8000/ws/analyze/${fileId}?scan_mode=${scanMode}`;
+    let wsUrl = '';
+    if (process.env.NEXT_PUBLIC_WS_URL) {
+      wsUrl = `${process.env.NEXT_PUBLIC_WS_URL}/ws/analyze/${fileId}?scan_mode=${scanMode}`;
+    } else if (typeof window !== 'undefined') {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const host = window.location.port === '3000' ? `${window.location.hostname}:8000` : window.location.host;
+      wsUrl = `${protocol}//${host}/ws/analyze/${fileId}?scan_mode=${scanMode}`;
+    } else {
+      wsUrl = `ws://localhost:8000/ws/analyze/${fileId}?scan_mode=${scanMode}`;
+    }
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {

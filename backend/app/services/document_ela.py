@@ -22,9 +22,6 @@ def perform_ela(image_path: str | Path, quality: int = 95, scale: int = 20) -> D
     # If the file is a PDF, we try to convert it. 
     # For robust execution without heavy system dependencies (like poppler for pdf2image),
     # we check if pdf2image is available, or load a placeholder document image.
-    temp_jpeg_path = Path("E:/Hackverse2k26/backend/temp/temp_ela_resaved.jpg")
-    temp_jpeg_path.parent.mkdir(parents=True, exist_ok=True)
-
     try:
         # Check if PDF
         suffix = Path(image_path).suffix.lower()

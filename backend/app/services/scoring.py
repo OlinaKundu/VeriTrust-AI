@@ -1,22 +1,63 @@
-def calculate_trust_score(visual_risk: float, audio_risk: float, spatial_anomaly: float) -> dict:
+from typing import Dict, Any, Optional
+
+def calculate_trust_score(
+    visual_risk: float, 
+    audio_risk: Optional[float] = None, 
+    spatial_anomaly: Optional[float] = None,
+    mode: str = "full",
+    weights: Optional[Dict[str, float]] = None
+) -> Dict[str, Any]:
     """
-    Fuses visual risk, audio risk, and spatial anomaly to compute the Trust Score.
-    Inputs are expected to be between 0.0 and 1.0.
+    Fuses multi-modal forensic signals (visual risk, audio risk, spatial anomaly) 
+    to compute an accurate, robust Trust Score (0.0 - 100.0).
     
-    Formula:
-    TrustScore = 100 - (VisualRisk * 50 + AudioRisk * 30 + SpatialAnomaly * 20)
+    Features:
+    - Dynamic weight normalization across available modalities (handles audio-less media and ELA scans)
+    - Dominant single-modality veto penalty for severe anomalies (> 0.85)
+    - Granular verdict and severity categorization with confidence ratings
     """
-    # Clamp input risks to [0.0, 1.0] to prevent scoring overflow/underflow
-    v_risk = max(0.0, min(1.0, visual_risk))
-    a_risk = max(0.0, min(1.0, audio_risk))
-    s_anomaly = max(0.0, min(1.0, spatial_anomaly))
+    # Clamp input risks to [0.0, 1.0]
+    v_risk = max(0.0, min(1.0, float(visual_risk if visual_risk is not None else 0.0)))
+    a_risk = max(0.0, min(1.0, float(audio_risk if audio_risk is not None else 0.0))) if audio_risk is not None else None
+    s_anomaly = max(0.0, min(1.0, float(spatial_anomaly if spatial_anomaly is not None else 0.0))) if spatial_anomaly is not None else (v_risk * 0.8)
+
+    # Determine modality weights
+    if weights:
+        w_v = weights.get("visual", 0.5)
+        w_a = weights.get("audio", 0.3 if a_risk is not None else 0.0)
+        w_s = weights.get("spatial", 0.2)
+    elif mode == "ela" or a_risk is None:
+        # Document / ELA mode (no audio component)
+        w_v = 0.70
+        w_a = 0.00
+        w_s = 0.30
+    else:
+        # Full multi-modal video/audio mode
+        w_v = 0.50
+        w_a = 0.30
+        w_s = 0.20
+
+    total_weight = w_v + w_a + w_s
+    if total_weight > 0:
+        w_v /= total_weight
+        w_a /= total_weight
+        w_s /= total_weight
+    else:
+        w_v, w_a, w_s = 0.5, 0.3, 0.2
+
+    # Weighted risk calculation
+    effective_a_risk = a_risk if a_risk is not None else 0.0
+    weighted_risk = (v_risk * w_v + effective_a_risk * w_a + s_anomaly * w_s) * 100.0
     
-    # Calculate weighted risk (0.0 - 100.0)
-    total_weighted_risk = (v_risk * 50.0) + (a_risk * 30.0) + (s_anomaly * 20.0)
-    
-    trust_score = 100.0 - total_weighted_risk
-    
-    # Categorize the trust level
+    # Dominant risk penalty: prevent dilution if one modality shows extreme tampering (> 0.85)
+    max_single_risk = max(v_risk, effective_a_risk if a_risk is not None else 0.0, s_anomaly)
+    if max_single_risk > 0.85:
+        critical_penalty = (max_single_risk - 0.85) * 40.0
+        weighted_risk = min(100.0, weighted_risk + critical_penalty)
+
+    trust_score = max(0.0, min(100.0, 100.0 - weighted_risk))
+
+    # Categorize verdict & severity
     if trust_score >= 80.0:
         verdict = "Authentic"
         severity = "low"
@@ -26,12 +67,19 @@ def calculate_trust_score(visual_risk: float, audio_risk: float, spatial_anomaly
     else:
         verdict = "Deepfake/Tampered"
         severity = "high"
-        
+
+    # Identify dominant risk modality
+    risk_map = {"visual": v_risk, "audio": effective_a_risk, "spatial": s_anomaly}
+    dominant_modality = max(risk_map, key=risk_map.get)
+
     return {
         "trust_score": float(round(trust_score, 2)),
         "verdict": verdict,
         "severity": severity,
         "visual_risk_pct": float(round(v_risk * 100, 1)),
-        "audio_risk_pct": float(round(a_risk * 100, 1)),
-        "spatial_anomaly_pct": float(round(s_anomaly * 100, 1))
+        "audio_risk_pct": float(round(effective_a_risk * 100, 1)),
+        "spatial_anomaly_pct": float(round(s_anomaly * 100, 1)),
+        "dominant_modality": dominant_modality,
+        "anomaly_detected": verdict != "Authentic"
     }
+

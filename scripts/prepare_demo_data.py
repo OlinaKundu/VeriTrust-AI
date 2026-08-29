@@ -7,7 +7,7 @@ from pathlib import Path
 from PIL import Image
 
 def generate_demo_dataset():
-    base_dir = Path("E:/Hackverse2k26/demo_assets")
+    base_dir = Path(__file__).resolve().parent.parent / "demo_assets"
     auth_dir = base_dir / "authentic"
     deep_dir = base_dir / "deepfake"
     doc_dir = base_dir / "documents"

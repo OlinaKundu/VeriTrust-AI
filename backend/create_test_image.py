@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 from pathlib import Path
 
-out_dir = Path("E:/Hackverse2k26/backend/temp")
+out_dir = Path(__file__).resolve().parent / "temp"
 out_dir.mkdir(parents=True, exist_ok=True)
 
 # Generate a synthetic face/document image
