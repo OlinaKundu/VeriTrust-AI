@@ -21,6 +21,8 @@ cd /app/frontend
 npm run start -- -p 3000 &
 FRONTEND_PID=$!
 
-# 3. Start Nginx Gateway (Port 7860)
-echo "[3/3] Launching Nginx Gateway on 0.0.0.0:7860..."
+# 3. Configure and Start Nginx Gateway
+APP_PORT="${PORT:-7860}"
+echo "[3/3] Configuring Nginx Gateway on 0.0.0.0:${APP_PORT}..."
+sed -i "s/listen 7860;/listen ${APP_PORT};/g" /etc/nginx/nginx.conf
 nginx -g "daemon off;"
