@@ -45,8 +45,9 @@ export default function AudioAnalytics({ audioData }: AudioAnalyticsProps) {
   }));
 
   // Formatting spectral frequency values for BarChart
-  const frequencyData = audioData.frequencies.map((val, index) => ({
-    band: `${index + 1}`,
+  const freqLabels = ['60Hz', '120Hz', '250Hz', '500Hz', '800Hz', '1kHz', '1.5k', '2kHz', '3kHz', '4kHz', '5kHz', '6kHz', '8kHz', '10k', '12k', '16k'];
+  const frequencyData = (audioData.frequencies || []).map((val, index) => ({
+    band: freqLabels[index] || `B${index + 1}`,
     value: parseFloat((val * 100).toFixed(1))
   }));
 

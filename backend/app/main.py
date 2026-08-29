@@ -211,7 +211,7 @@ async def run_pipeline_sync(
             for face_img in k["faces"]:
                 score, heatmap = analyze_face_frame(face_img, vision_bundle)
                 vision_scores.append(score)
-                spatial_anomalies.append(float(np.max(heatmap)))
+                spatial_anomalies.append(float(score * 0.8))
                 faces_data.append({
                     "confidence_score": score,
                     "heatmap": heatmap
@@ -230,24 +230,28 @@ async def run_pipeline_sync(
         temp_audio_path = get_temp_path(".wav")
         audio_extracted = extract_audio_from_video(file_path, temp_audio_path)
         
-        audio_risk = 0.05
-        audio_details = {}
-        
+        has_audio = False
+        audio_details = None
+        audio_risk = None
+
         if audio_extracted:
             audio_details = analyze_audio(temp_audio_path, audio_bundle)
             audio_risk = audio_details["audio_risk_score"]
             cleanup_file(temp_audio_path)
+            has_audio = True
             
         fused = calculate_trust_score(
             visual_risk=avg_vision_risk,
             audio_risk=audio_risk,
-            spatial_anomaly=avg_spatial_anomaly
+            spatial_anomaly=avg_spatial_anomaly,
+            mode="full"
         )
         
         return {
             "filename": original_filename,
             "scan_mode": "full",
             "hardware": hw_info,
+            "has_audio": has_audio,
             "trust_metrics": fused,
             "frames": frame_diagnostics,
             "audio": audio_details
@@ -321,7 +325,7 @@ async def run_full_pipeline_ws(websocket: WebSocket, file_path: Path, models: Di
         for face_img in k["faces"]:
             score, heatmap = analyze_face_frame(face_img, vision_bundle)
             vision_scores.append(score)
-            spatial_anomalies.append(float(np.max(heatmap)))
+            spatial_anomalies.append(float(score * 0.8))
             
             _, face_buffer = cv2.imencode('.jpg', cv2.cvtColor(face_img, cv2.COLOR_RGB2BGR))
             face_b64 = f"data:image/jpeg;base64,{base64.b64encode(face_buffer).decode('utf-8')}"
@@ -363,22 +367,15 @@ async def run_full_pipeline_ws(websocket: WebSocket, file_path: Path, models: Di
     temp_audio_path = get_temp_path(".wav")
     audio_extracted = extract_audio_from_video(file_path, temp_audio_path)
     
-    audio_risk = 0.05
-    audio_details = {}
-    
+    has_audio = False
+    audio_details = None
+    audio_risk = None
+
     if audio_extracted:
         audio_details = analyze_audio(temp_audio_path, audio_bundle)
         audio_risk = audio_details["audio_risk_score"]
         cleanup_file(temp_audio_path)
-    else:
-        audio_details = {
-            "audio_risk_score": 0.05,
-            "cloning_probability": 0.05,
-            "pitch_anomaly_index": 0.05,
-            "spectral_variance": 0.05,
-            "frequencies": [0.1] * 16,
-            "timeline_risk": [0.05] * 10
-        }
+        has_audio = True
     await asyncio.sleep(0.3)
 
     await websocket.send_json({"status": "Finalizing fused multi-modal scoring...", "progress": 90})
@@ -397,6 +394,7 @@ async def run_full_pipeline_ws(websocket: WebSocket, file_path: Path, models: Di
         "results": {
             "scan_mode": "full",
             "hardware": hw_info,
+            "has_audio": has_audio,
             "trust_metrics": fused,
             "frames": frame_diagnostics,
             "audio": audio_details

@@ -321,9 +321,10 @@ export default function Dashboard() {
                     </button>
                   </div>
                   <MetricGrid
-                    metrics={scanMode === 'ela' ? results.ela_details : results.trust_metrics}
+                    metrics={scanMode === 'ela' ? (results.ela_details || results.trust_metrics || {}) : (results.trust_metrics || {})}
                     scanMode={scanMode}
                     deviceName={hardwareInfo.device_name}
+                    hasAudio={results.has_audio}
                   />
                   <div className="bg-white/2 rounded-lg p-3 border border-white/5 text-[11px] text-gray-400 font-mono flex justify-between items-center">
                     <span>ACCELERATOR: {hardwareInfo.device_name} (CUDA {hardwareInfo.cuda_version})</span>
@@ -355,7 +356,7 @@ export default function Dashboard() {
                 )
               )}
 
-              {scanMode === 'full' && results.audio && (
+              {scanMode === 'full' && results.has_audio && results.audio && (
                 <AudioAnalytics audioData={results.audio} />
               )}
             </>

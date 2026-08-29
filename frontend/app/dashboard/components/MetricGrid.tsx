@@ -4,18 +4,20 @@ import React from 'react';
 import { Video, Mic, Compass, FileWarning, Zap } from 'lucide-react';
 
 interface MetricGridProps {
-  metrics: {
+  metrics?: {
     visual_risk_pct?: number;
     audio_risk_pct?: number;
     spatial_anomaly_pct?: number;
     anomaly_pixels_pct?: number;
     tamper_score?: number;
-  };
+  } | null;
   scanMode: 'full' | 'ela';
   deviceName?: string;
+  hasAudio?: boolean;
 }
 
-export default function MetricGrid({ metrics, scanMode, deviceName }: MetricGridProps) {
+export default function MetricGrid({ metrics, scanMode, deviceName, hasAudio = true }: MetricGridProps) {
+  const safeMetrics = metrics || {};
   
   const getRiskColor = (pct: number) => {
     if (pct >= 70) return 'text-secondary glow-text-pink';
@@ -33,27 +35,27 @@ export default function MetricGrid({ metrics, scanMode, deviceName }: MetricGrid
     <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 w-full">
       {/* Metric 1 */}
       {scanMode === 'full' ? (
-        <div className={`glass-panel border rounded-xl p-4 flex flex-col justify-between transition-all duration-300 ${getCardStyle(metrics.visual_risk_pct || 0)}`}>
+        <div className={`glass-panel border rounded-xl p-4 flex flex-col justify-between transition-all duration-300 ${getCardStyle(safeMetrics.visual_risk_pct || 0)}`}>
           <div className="flex justify-between items-start">
             <span className="text-[10px] font-mono text-gray-400 uppercase font-semibold">Face Splicing Index</span>
             <Video className="w-4 h-4 text-gray-400" />
           </div>
           <div className="mt-4">
-            <p className={`text-2xl font-mono font-extrabold ${getRiskColor(metrics.visual_risk_pct || 0)}`}>
-              {metrics.visual_risk_pct?.toFixed(1)}%
+            <p className={`text-2xl font-mono font-extrabold ${getRiskColor(safeMetrics.visual_risk_pct || 0)}`}>
+              {safeMetrics.visual_risk_pct?.toFixed(1) || '0.0'}%
             </p>
             <p className="text-[10px] text-gray-500 font-medium uppercase mt-0.5">ViT GPU Anomaly</p>
           </div>
         </div>
       ) : (
-        <div className={`glass-panel border rounded-xl p-4 flex flex-col justify-between transition-all duration-300 ${getCardStyle((metrics.tamper_score || 0) * 100)}`}>
+        <div className={`glass-panel border rounded-xl p-4 flex flex-col justify-between transition-all duration-300 ${getCardStyle((safeMetrics.tamper_score || 0) * 100)}`}>
           <div className="flex justify-between items-start">
             <span className="text-[10px] font-mono text-gray-400 uppercase font-semibold">Tamper Index</span>
             <FileWarning className="w-4 h-4 text-gray-400" />
           </div>
           <div className="mt-4">
-            <p className={`text-2xl font-mono font-extrabold ${getRiskColor((metrics.tamper_score || 0) * 100)}`}>
-              {((metrics.tamper_score || 0) * 100).toFixed(1)}%
+            <p className={`text-2xl font-mono font-extrabold ${getRiskColor((safeMetrics.tamper_score || 0) * 100)}`}>
+              {((safeMetrics.tamper_score || 0) * 100).toFixed(1)}%
             </p>
             <p className="text-[10px] text-gray-500 font-medium uppercase mt-0.5">Compression Deviation</p>
           </div>
@@ -62,27 +64,29 @@ export default function MetricGrid({ metrics, scanMode, deviceName }: MetricGrid
 
       {/* Metric 2 */}
       {scanMode === 'full' ? (
-        <div className={`glass-panel border rounded-xl p-4 flex flex-col justify-between transition-all duration-300 ${getCardStyle(metrics.audio_risk_pct || 0)}`}>
+        <div className={`glass-panel border border-white/5 rounded-xl p-4 flex flex-col justify-between transition-all duration-300 ${hasAudio ? getCardStyle(safeMetrics.audio_risk_pct || 0) : 'opacity-60'}`}>
           <div className="flex justify-between items-start">
             <span className="text-[10px] font-mono text-gray-400 uppercase font-semibold">Voice Clone Index</span>
             <Mic className="w-4 h-4 text-gray-400" />
           </div>
           <div className="mt-4">
-            <p className={`text-2xl font-mono font-extrabold ${getRiskColor(metrics.audio_risk_pct || 0)}`}>
-              {metrics.audio_risk_pct?.toFixed(1)}%
+            <p className={`text-2xl font-mono font-extrabold ${hasAudio ? getRiskColor(safeMetrics.audio_risk_pct || 0) : 'text-gray-500'}`}>
+              {hasAudio ? `${safeMetrics.audio_risk_pct?.toFixed(1) || '0.0'}%` : 'N/A'}
             </p>
-            <p className="text-[10px] text-gray-500 font-medium uppercase mt-0.5">Wav2Vec2 CUDA Score</p>
+            <p className="text-[10px] text-gray-500 font-medium uppercase mt-0.5">
+              {hasAudio ? 'Wav2Vec2 CUDA Score' : 'No Audio Stream'}
+            </p>
           </div>
         </div>
       ) : (
-        <div className={`glass-panel border rounded-xl p-4 flex flex-col justify-between transition-all duration-300 ${getCardStyle(metrics.anomaly_pixels_pct || 0)}`}>
+        <div className={`glass-panel border rounded-xl p-4 flex flex-col justify-between transition-all duration-300 ${getCardStyle(safeMetrics.anomaly_pixels_pct || 0)}`}>
           <div className="flex justify-between items-start">
             <span className="text-[10px] font-mono text-gray-400 uppercase font-semibold">Altered Pixels</span>
             <FileWarning className="w-4 h-4 text-gray-400" />
           </div>
           <div className="mt-4">
-            <p className={`text-2xl font-mono font-extrabold ${getRiskColor(metrics.anomaly_pixels_pct || 0)}`}>
-              {metrics.anomaly_pixels_pct?.toFixed(1)}%
+            <p className={`text-2xl font-mono font-extrabold ${getRiskColor(safeMetrics.anomaly_pixels_pct || 0)}`}>
+              {safeMetrics.anomaly_pixels_pct?.toFixed(1) || '0.0'}%
             </p>
             <p className="text-[10px] text-gray-500 font-medium uppercase mt-0.5">Pixel delta density</p>
           </div>
@@ -91,14 +95,14 @@ export default function MetricGrid({ metrics, scanMode, deviceName }: MetricGrid
 
       {/* Metric 3 */}
       {scanMode === 'full' ? (
-        <div className={`glass-panel border rounded-xl p-4 flex flex-col justify-between transition-all duration-300 ${getCardStyle(metrics.spatial_anomaly_pct || 0)}`}>
+        <div className={`glass-panel border rounded-xl p-4 flex flex-col justify-between transition-all duration-300 ${getCardStyle(safeMetrics.spatial_anomaly_pct || 0)}`}>
           <div className="flex justify-between items-start">
             <span className="text-[10px] font-mono text-gray-400 uppercase font-semibold">Spatial Anomalies</span>
             <Compass className="w-4 h-4 text-gray-400" />
           </div>
           <div className="mt-4">
-            <p className={`text-2xl font-mono font-extrabold ${getRiskColor(metrics.spatial_anomaly_pct || 0)}`}>
-              {metrics.spatial_anomaly_pct?.toFixed(1)}%
+            <p className={`text-2xl font-mono font-extrabold ${getRiskColor(safeMetrics.spatial_anomaly_pct || 0)}`}>
+              {safeMetrics.spatial_anomaly_pct?.toFixed(1) || '0.0'}%
             </p>
             <p className="text-[10px] text-gray-500 font-medium uppercase mt-0.5">Grad-CAM Mismatch</p>
           </div>
