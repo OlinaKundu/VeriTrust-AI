@@ -129,9 +129,3 @@ You can test the platform instantly using the files in [`demo_assets/`](file:///
 
 ---
 
-## 🏆 Pitch & Presentation Strategy
-
-Check out [`docs/PITCH_PLAYBOOK.md`](file:///E:/Hackverse2k26/docs/PITCH_PLAYBOOK.md) for:
-* **30-Second Elevator Pitch** on multi-modal triangulation.
-* **2-Minute Step-by-Step Live Demo Script** for judges.
-* **Judge Q&A Cheat Sheet** addressing model accuracy, $0 local edge GPU costs, and zero-leakage privacy compliance.
