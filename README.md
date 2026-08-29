@@ -4,7 +4,7 @@ VeriTrust AI is a GPU-accelerated forensic platform engineered for real-time dee
 
 ---
 
-## ⚡ Hardware Acceleration & Lifespan Engine
+## Hardware Acceleration & Lifespan Engine
 
 * **Detected GPU**: `NVIDIA GeForce RTX 3050 Laptop GPU` (CUDA 11.8)
 * **Precision**: `torch.cuda.amp.autocast()` (FP16 Mixed Precision)
@@ -12,7 +12,7 @@ VeriTrust AI is a GPU-accelerated forensic platform engineered for real-time dee
 
 ---
 
-## 📂 Workspace Directory Structure
+## Workspace Directory Structure
 
 ```
 /
@@ -63,7 +63,7 @@ VeriTrust AI is a GPU-accelerated forensic platform engineered for real-time dee
 
 ---
 
-## 🚀 Quick Start Guide
+## Quick Start Guide
 
 ### 1. Start the FastAPI Backend
 
@@ -104,7 +104,7 @@ VeriTrust AI is a GPU-accelerated forensic platform engineered for real-time dee
 
 ---
 
-## 🧪 Testing with Demo Assets
+## Testing with Demo Assets
 
 You can test the platform instantly using the files in [`demo_assets/`](file:///E:/Hackverse2k26/demo_assets):
 
