@@ -33,10 +33,8 @@ def warmup_vit(target_device: str = "cuda:0") -> Dict[str, Any]:
         try:
             from pytorch_grad_cam import GradCAM
             target_layers = [vit_model.vit.layernorm]
-            try:
-                grad_cam = GradCAM(model=vit_model, target_layers=target_layers)
-            except TypeError:
-                grad_cam = GradCAM(model=vit_model, target_layers=target_layers, use_cuda=info["cuda_available"])
+            grad_cam = GradCAM(model=vit_model, target_layers=target_layers)
+            
         except Exception as e:
             print(f"[WARMUP]: Grad-CAM setup fallback ({e})")
             grad_cam = None
