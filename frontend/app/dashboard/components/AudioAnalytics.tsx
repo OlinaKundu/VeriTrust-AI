@@ -55,13 +55,29 @@ export default function AudioAnalytics({ audioData }: AudioAnalyticsProps) {
   }));
 
   const customTooltipStyle = {
-    backgroundColor: '#0a0e17',
-    border: '1px solid rgba(0, 240, 255, 0.2)',
+    backgroundColor: '#070c18',
+    border: '1px solid rgba(0, 240, 255, 0.3)',
     borderRadius: '8px',
-    color: '#e2e8f0',
+    color: '#ffffff',
     fontFamily: 'monospace',
     fontSize: '11px',
-    boxShadow: '0 4px 20px rgba(0,0,0,0.5)'
+    boxShadow: '0 8px 32px rgba(0, 0, 0, 0.75)',
+    padding: '8px 12px'
+  };
+
+  const customItemStyle = {
+    color: '#38bdf8',
+    fontSize: '11px',
+    fontFamily: 'monospace',
+    fontWeight: '600'
+  };
+
+  const customLabelStyle = {
+    color: '#ffffff',
+    fontFamily: 'monospace',
+    fontWeight: '700',
+    fontSize: '12px',
+    marginBottom: '3px'
   };
 
   // Cohesive theme colors
@@ -104,7 +120,12 @@ export default function AudioAnalytics({ audioData }: AudioAnalyticsProps) {
                 </defs>
                 <XAxis dataKey="time" stroke="#475569" fontSize={9} tickLine={false} />
                 <YAxis stroke="#475569" fontSize={9} domain={[0, 100]} tickLine={false} />
-                <Tooltip contentStyle={customTooltipStyle} />
+                <Tooltip 
+                  contentStyle={customTooltipStyle} 
+                  itemStyle={customItemStyle}
+                  labelStyle={customLabelStyle}
+                  cursor={{ stroke: 'rgba(0, 240, 255, 0.4)', strokeWidth: 1, strokeDasharray: '3 3' }}
+                />
                 <Area 
                   type="monotone" 
                   dataKey="risk" 
@@ -149,7 +170,12 @@ export default function AudioAnalytics({ audioData }: AudioAnalyticsProps) {
                 </defs>
                 <XAxis dataKey="band" stroke="#475569" fontSize={8} tickLine={false} />
                 <YAxis stroke="#475569" fontSize={9} domain={[0, 100]} tickLine={false} />
-                <Tooltip contentStyle={customTooltipStyle} />
+                <Tooltip 
+                  contentStyle={customTooltipStyle} 
+                  itemStyle={customItemStyle}
+                  labelStyle={customLabelStyle}
+                  cursor={{ fill: 'rgba(0, 240, 255, 0.08)' }}
+                />
                 <Bar dataKey="value" name="Spectral Energy (%)" radius={[3, 3, 0, 0]}>
                   {frequencyData.map((entry, index) => {
                     const isHighEnergy = entry.value >= 70;
