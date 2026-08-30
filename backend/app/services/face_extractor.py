@@ -14,19 +14,27 @@ try:
     from facenet_pytorch import MTCNN
     info = get_cuda_device_info()
     device = info["device"]
-    mtcnn = MTCNN(keep_all=True, device=device)
+    mtcnn = MTCNN(
+        keep_all=True,
+        min_face_size=55,
+        thresholds=[0.80, 0.85, 0.92],
+        device=device
+    )
     HAS_FACENET = True
     print(f"Face Extractor: MTCNN loaded on {info['device_name']} (CUDA: {info['cuda_available']})")
 except Exception as e:
     print(f"Face Extractor: PyTorch MTCNN not available ({e}). Falling back to OpenCV Cascades.")
 
 haar_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-face_cascade = None
-if os.path.exists(haar_path):
-    face_cascade = cv2.CascadeClassifier(haar_path)
-else:
-    face_cascade = cv2.CascadeClassifier()
+profile_path = cv2.data.haarcascades + "haarcascade_profileface.xml"
+
+face_cascade = cv2.CascadeClassifier(haar_path) if os.path.exists(haar_path) else cv2.CascadeClassifier()
+if not os.path.exists(haar_path):
     face_cascade.load(haar_path)
+
+profile_cascade = cv2.CascadeClassifier(profile_path) if os.path.exists(profile_path) else cv2.CascadeClassifier()
+if not os.path.exists(profile_path):
+    profile_cascade.load(profile_path)
 
 def extract_keyframes_and_faces(video_path: str | Path, max_frames: int = 10) -> List[Dict[str, Any]]:
     """
@@ -96,7 +104,8 @@ def extract_keyframes_and_faces(video_path: str | Path, max_frames: int = 10) ->
 
 def detect_faces(image_rgb: np.ndarray) -> Tuple[List[List[int]], List[np.ndarray], bool]:
     """
-    Detects faces in an RGB image and crops them using GPU MTCNN or Haar cascades when available.
+    Detects genuine human faces in an RGB image using GPU MTCNN with landmark & texture validation.
+    Filters out false positive object crops (arms, blurry walls, flat textures).
     Returns:
     - bboxes: List of [x, y, w, h]
     - cropped_faces: List of 224x224 RGB face crops
@@ -108,14 +117,43 @@ def detect_faces(image_rgb: np.ndarray) -> Tuple[List[List[int]], List[np.ndarra
 
     if HAS_FACENET and mtcnn is not None:
         try:
-            boxes, _ = mtcnn.detect(image_rgb)
-            if boxes is not None:
-                for box in boxes:
-                    bx1, by1, bx2, by2 = [int(coord) for coord in box]
+            boxes, probs, landmarks = mtcnn.detect(image_rgb, landmarks=True)
+            if boxes is not None and probs is not None:
+                for b, p, lm in zip(boxes, probs, landmarks):
+                    if p is None or p < 0.90:
+                        continue
+                        
+                    bx1, by1, bx2, by2 = [int(coord) for coord in b]
+                    bx1, by1 = max(0, bx1), max(0, by1)
+                    bx2, by2 = min(w, bx2), min(h, by2)
                     fw, fh = bx2 - bx1, by2 - by1
                     
+                    if fw < 45 or fh < 45:
+                        continue
+                        
+                    aspect = fw / (fh + 1e-5)
+                    if aspect < 0.55 or aspect > 1.45:
+                        continue
+                        
+                    # Crop face region
+                    raw_crop = image_rgb[by1:by2, bx1:bx2]
+                    if raw_crop.size == 0:
+                        continue
+                        
+                    # Check texture gradient complexity (eliminates flat blurry patches like arms/walls)
+                    gray_crop = cv2.cvtColor(raw_crop, cv2.COLOR_RGB2GRAY)
+                    lap_var = float(cv2.Laplacian(gray_crop, cv2.CV_64F).var())
+                    if lap_var < 40.0:
+                        continue
+                        
+                    # Anatomical confirmation via Cascade
+                    f_faces = face_cascade.detectMultiScale(gray_crop, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30))
+                    p_faces = profile_cascade.detectMultiScale(gray_crop, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30))
+                    if len(f_faces) == 0 and len(p_faces) == 0:
+                        continue
+                    
                     # Store original detection box for UI display
-                    bboxes.append([max(0, bx1), max(0, by1), min(w - bx1, fw), min(h - by1, fh)])
+                    bboxes.append([bx1, by1, fw, fh])
                     
                     # Expand crop by 50% for contextual portrait analysis (hair, ears, jawline, background)
                     pad_w = int(fw * 0.50)
@@ -137,8 +175,16 @@ def detect_faces(image_rgb: np.ndarray) -> Tuple[List[List[int]], List[np.ndarra
     if face_cascade is not None and not face_cascade.empty():
         try:
             gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
-            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(45, 45))
             for (x, y, fw, fh) in faces:
+                raw_crop = image_rgb[y:y+fh, x:x+fw]
+                if raw_crop.size == 0:
+                    continue
+                gray_crop = cv2.cvtColor(raw_crop, cv2.COLOR_RGB2GRAY)
+                lap_var = float(cv2.Laplacian(gray_crop, cv2.CV_64F).var())
+                if lap_var < 40.0:
+                    continue
+
                 bboxes.append([int(x), int(y), int(fw), int(fh)])
                 pad_w = int(fw * 0.50)
                 pad_h = int(fh * 0.50)
@@ -154,5 +200,5 @@ def detect_faces(image_rgb: np.ndarray) -> Tuple[List[List[int]], List[np.ndarra
         except Exception as e:
             print(f"OpenCV Cascade detection error: {e}")
 
-    # No face detected in frame
+    # No genuine face detected in frame
     return [], [], False

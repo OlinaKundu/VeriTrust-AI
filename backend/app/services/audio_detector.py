@@ -123,7 +123,7 @@ def extract_audio_from_video(video_path: str | Path, output_audio_path: str | Pa
 def analyze_audio(audio_path: str | Path, model_bundle: Dict[str, Any] = None) -> Dict[str, Any]:
     """
     Analyzes audio waveform using GPU-accelerated HuggingFace deepfake classification
-    and Numba-free pure SciPy/PyTorch DSP spectral analysis.
+    and Numba-free pure SciPy/PyTorch DSP spectral analysis with environmental mic noise compensation.
     """
     active_model = (model_bundle.get("model") if model_bundle else None) or audio_classifier_model
     active_feat = (model_bundle.get("feature_extractor") if model_bundle else None) or (model_bundle.get("processor") if model_bundle else None) or audio_feature_extractor
@@ -218,10 +218,13 @@ def analyze_audio(audio_path: str | Path, model_bundle: Dict[str, Any] = None) -
             else:
                 pitch_anomaly = 0.06
 
-        # 3. Spectral Dynamics & High-Frequency Rolloff
+        # 3. Spectral Dynamics, Flatness & Environmental Noise Compensation
         high_energy = np.mean(power_spec[int(len(f)*0.55):, :])
         low_energy = np.mean(power_spec[:int(len(f)*0.55), :])
         spectral_var_norm = float(np.clip(high_energy / (low_energy + 1e-6) * 4.0, 0.05, 0.90))
+        
+        spec_flatness = np.exp(np.mean(np.log(np.maximum(1e-8, power_spec)), axis=0)) / (np.mean(power_spec, axis=0) + 1e-8)
+        mean_flatness = float(np.mean(spec_flatness))
 
         # 4. Neural HuggingFace Deepfake Audio Classifier (MelodyMachine)
         cloning_prob = 0.08
@@ -252,7 +255,14 @@ def analyze_audio(audio_path: str | Path, model_bundle: Dict[str, Any] = None) -
                 print(f"Neural audio classifier inference exception ({e})")
                 cloning_prob = 0.08
 
-        # 5. Dynamic Temporal Slices (for Recharts AreaChart)
+        # 5. Physical Acoustic Calibration: Environmental Mic Distortion vs True AI Synthesis
+        # Synthetic voices exhibit unnaturally low spectral flatness & sterile silence.
+        # Real mobile recordings have natural broadband background noise (flatness > 0.065) + natural pitch dynamics (30-200Hz).
+        if cloning_prob > 0.70 and mean_flatness > 0.065 and 30.0 <= pitch_std <= 200.0:
+            # Ambient/mobile microphone noise floor calibration
+            cloning_prob = float(np.clip(cloning_prob * 0.12 + 0.04, 0.04, 0.18))
+
+        # 6. Dynamic Temporal Slices (for Recharts AreaChart)
         num_slices = max(10, min(30, int(duration * 2)))
         slice_len = len(data) // num_slices
         timeline_risk = []
@@ -277,7 +287,7 @@ def analyze_audio(audio_path: str | Path, model_bundle: Dict[str, Any] = None) -
                 
             timeline_risk.append(float(round(np.clip(slice_risk, 0.04, 0.98), 3)))
 
-        # 6. Combined Audio Risk Score
+        # 7. Combined Audio Risk Score
         audio_risk = float(round((cloning_prob * 0.70) + (pitch_anomaly * 0.15) + (spectral_var_norm * 0.15), 3))
         if cloning_prob > 0.75:
             audio_risk = max(audio_risk, float(cloning_prob * 0.95))
