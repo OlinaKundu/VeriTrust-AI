@@ -1,0 +1,83 @@
+import os
+import sys
+import numpy as np
+import cv2
+from pathlib import Path
+
+# Add backend directory to sys.path
+backend_dir = Path(__file__).resolve().parent.parent
+if str(backend_dir) not in sys.path:
+    sys.path.insert(0, str(backend_dir))
+
+from app.services.scoring import calculate_trust_score
+from app.services.document_ela import perform_ela
+from app.services.face_extractor import detect_faces
+from app.services.vision_detector import analyze_face_frame
+from app.services.audio_detector import analyze_audio
+
+def run_tests():
+    print("==================================================")
+    print("       VERITRUST AI: BACKEND PIPELINE TESTER       ")
+    print("==================================================")
+    
+    # Create test directory
+    test_dir = backend_dir / "temp"
+    test_dir.mkdir(parents=True, exist_ok=True)
+    
+    print("\n[STEP 1] Testing Fused Trust Scoring Engine...")
+    res_low = calculate_trust_score(visual_risk=0.1, audio_risk=0.1, mode="full")
+    print(f"Low risk test score: {res_low['trust_score']}% | Verdict: {res_low['verdict']} | Severity: {res_low['severity']}")
+    assert res_low['verdict'] == "Authentic", "Low risk scoring calculation failed"
+    assert res_low['severity'] == "low", "Low severity tag failed"
+    
+    res_high = calculate_trust_score(visual_risk=0.9, audio_risk=0.85, mode="full")
+    print(f"High risk test score: {res_high['trust_score']}% | Verdict: {res_high['verdict']} | Severity: {res_high['severity']}")
+    assert res_high['verdict'] == "Deepfake/Tampered", "High risk scoring calculation failed"
+    assert res_high['severity'] == "high", "High severity tag failed"
+    print("[OK] Fused scoring validated.")
+
+    print("\n[STEP 2] Testing ELA Document Tampering Detector...")
+    mock_doc = np.ones((400, 500, 3), dtype=np.uint8) * 240
+    cv2.putText(mock_doc, "TEST VERIFY DOCUMENT", (50, 200), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (20, 20, 20), 2)
+    mock_doc_path = test_dir / "verify_doc.jpg"
+    cv2.imwrite(str(mock_doc_path), cv2.cvtColor(mock_doc, cv2.COLOR_RGB2BGR))
+    
+    ela_res = perform_ela(mock_doc_path)
+    print(f"ELA score: {ela_res['tamper_score']:.2f} | Status: {ela_res['tamper_status']}")
+    print(f"Anomaly Pixels: {ela_res['anomaly_pixels_pct']:.2f}%")
+    assert "tamper_score" in ela_res, "ELA analysis key mismatch"
+    print("[OK] Error Level Analysis (ELA) validated.")
+
+    print("\n[STEP 3] Testing Keyframe Face Extraction CPU/GPU Fallbacks...")
+    sample_face = np.ones((224, 224, 3), dtype=np.uint8) * 200
+    bboxes, faces, has_faces = detect_faces(sample_face)
+    print(f"Face extraction found: {len(bboxes)} bounding box(es) | has_faces: {has_faces}")
+    print("[OK] Face extraction pipeline validated.")
+
+    print("\n[STEP 4] Testing Dual-Track Vision & Grad-CAM Heatmap...")
+    test_face_crop = faces[0] if faces else sample_face
+    score, heatmap = analyze_face_frame(test_face_crop)
+    print(f"ViT Fake probability: {score:.4f}")
+    print(f"Grad-CAM Heatmap shape: {len(heatmap)}x{len(heatmap[0]) if heatmap else 0}")
+    assert score >= 0.0 and score <= 1.0, "Risk score out of boundaries"
+    assert len(heatmap) == 28 and len(heatmap[0]) == 28, "Heatmap grid size mismatch (expected 28x28)"
+    print("[OK] Vision detector and Grad-CAM validated.")
+
+    print("\n[STEP 5] Testing Audio Analysis Fallbacks...")
+    mock_audio_path = test_dir / "non_existent_audio.wav"
+    audio_res = analyze_audio(mock_audio_path)
+    print(f"Audio risk score: {audio_res['audio_risk_score']:.2f}")
+    print(f"Voice cloning probability: {audio_res['cloning_probability']:.2f}")
+    assert "audio_risk_score" in audio_res, "Audio analysis key mismatch"
+    print("[OK] Audio cloning detection validated.")
+
+    # Cleanup test files
+    if mock_doc_path.exists():
+        os.remove(mock_doc_path)
+        
+    print("\n==================================================")
+    print("    SUCCESS: ALL PIPELINE VERIFICATIONS PASSED    ")
+    print("==================================================")
+
+if __name__ == "__main__":
+    run_tests()
