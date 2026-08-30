@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { Volume2, BarChart3, TrendingUp, Music } from 'lucide-react';
+import { Volume2, BarChart3, TrendingUp, Music, Activity } from 'lucide-react';
 import {
   AreaChart,
   Area,
@@ -37,11 +37,14 @@ export default function AudioAnalytics({ audioData }: AudioAnalyticsProps) {
     );
   }
 
+  const isHighRisk = audioData.audio_risk_score >= 0.50;
+  const isModerateRisk = audioData.audio_risk_score >= 0.25;
+
   // Formatting temporal data for the AreaChart
   const timelineData = audioData.timeline_risk.map((risk, index) => ({
     time: `${index}s`,
     risk: parseFloat((risk * 100).toFixed(1)),
-    threshold: 50 // Threshold line representing high risk boundary
+    threshold: 50
   }));
 
   // Formatting spectral frequency values for BarChart
@@ -52,38 +55,51 @@ export default function AudioAnalytics({ audioData }: AudioAnalyticsProps) {
   }));
 
   const customTooltipStyle = {
-    backgroundColor: '#0f1524',
-    border: '1px solid rgba(255, 255, 255, 0.1)',
+    backgroundColor: '#0a0e17',
+    border: '1px solid rgba(0, 240, 255, 0.2)',
     borderRadius: '8px',
     color: '#e2e8f0',
     fontFamily: 'monospace',
-    fontSize: '11px'
+    fontSize: '11px',
+    boxShadow: '0 4px 20px rgba(0,0,0,0.5)'
   };
 
+  // Cohesive theme colors
+  const primaryStroke = isHighRisk ? '#ff007f' : isModerateRisk ? '#f59e0b' : '#00f0ff';
+  const primaryGlowClass = isHighRisk ? 'glow-text-pink text-[#ff007f]' : isModerateRisk ? 'text-amber-400' : 'glow-text-cyan text-primary';
+
   return (
-    <div className="glass-panel rounded-xl p-5 w-full flex flex-col space-y-5">
+    <div className="glass-panel rounded-xl p-5 w-full flex flex-col space-y-5 border border-white/5 bg-slate-950/40">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-mono text-primary uppercase tracking-wider glow-text-cyan flex items-center gap-2">
+        <h3 className={`text-sm font-mono uppercase tracking-wider flex items-center gap-2 ${primaryGlowClass}`}>
           <Music className="w-4 h-4" /> Synthetic Audio Spectrum
         </h3>
-        <span className="text-[10px] font-mono text-gray-500 uppercase">Wav2Vec2 + Librosa Analysis</span>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded border border-cyan-500/20 bg-cyan-500/10 text-cyan-400 uppercase flex items-center gap-1">
+            <Activity className="w-3 h-3" /> Acoustic DSP + Neural Engine
+          </span>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* Temporal Risk Area Chart */}
         <div className="flex flex-col space-y-2">
           <div className="flex items-center justify-between text-[11px] font-mono text-gray-400">
-            <span className="flex items-center gap-1.5"><TrendingUp className="w-3.5 h-3.5 text-primary" /> Temporal Risk Variance</span>
-            <span className="text-primary font-semibold">Max Risk: {Math.round(Math.max(...audioData.timeline_risk) * 100)}%</span>
+            <span className="flex items-center gap-1.5">
+              <TrendingUp className="w-3.5 h-3.5 text-cyan-400" /> Temporal Risk Variance
+            </span>
+            <span className={`font-semibold ${isHighRisk ? 'text-[#ff007f]' : isModerateRisk ? 'text-amber-400' : 'text-cyan-400'}`}>
+              Peak: {Math.round(Math.max(...audioData.timeline_risk, 0) * 100)}%
+            </span>
           </div>
           
-          <div className="h-44 w-full bg-black/10 border border-white/5 rounded-lg p-2">
+          <div className="h-44 w-full bg-black/20 border border-white/5 rounded-lg p-2 relative">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={timelineData}>
+              <AreaChart data={timelineData} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
                 <defs>
-                  <linearGradient id="riskGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#ff007f" stopOpacity={0.4} />
-                    <stop offset="95%" stopColor="#ff007f" stopOpacity={0.0} />
+                  <linearGradient id="temporalRiskGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor={primaryStroke} stopOpacity={0.45} />
+                    <stop offset="95%" stopColor={primaryStroke} stopOpacity={0.0} />
                   </linearGradient>
                 </defs>
                 <XAxis dataKey="time" stroke="#475569" fontSize={9} tickLine={false} />
@@ -92,11 +108,11 @@ export default function AudioAnalytics({ audioData }: AudioAnalyticsProps) {
                 <Area 
                   type="monotone" 
                   dataKey="risk" 
-                  stroke="#ff007f" 
+                  stroke={primaryStroke} 
                   strokeWidth={2}
                   fillOpacity={1} 
-                  fill="url(#riskGrad)" 
-                  name="Cloning Risk"
+                  fill="url(#temporalRiskGrad)" 
+                  name="Cloning Risk (%)"
                 />
               </AreaChart>
             </ResponsiveContainer>
@@ -106,25 +122,50 @@ export default function AudioAnalytics({ audioData }: AudioAnalyticsProps) {
         {/* Spectral Frequency Anomaly Bar Chart */}
         <div className="flex flex-col space-y-2">
           <div className="flex items-center justify-between text-[11px] font-mono text-gray-400">
-            <span className="flex items-center gap-1.5"><BarChart3 className="w-3.5 h-3.5 text-primary" /> Robotic Pitch Deviation</span>
-            <span className="text-secondary font-semibold">Entropy: {audioData.pitch_anomaly_index.toFixed(2)}</span>
+            <span className="flex items-center gap-1.5">
+              <BarChart3 className="w-3.5 h-3.5 text-cyan-400" /> 16-Band Spectral Equalizer
+            </span>
+            <span className="text-cyan-400 font-semibold">
+              Pitch Index: {audioData.pitch_anomaly_index.toFixed(2)}
+            </span>
           </div>
 
-          <div className="h-44 w-full bg-black/10 border border-white/5 rounded-lg p-2">
+          <div className="h-44 w-full bg-black/20 border border-white/5 rounded-lg p-2">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={frequencyData}>
+              <BarChart data={frequencyData} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="barHighGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#ff007f" stopOpacity={0.9} />
+                    <stop offset="100%" stopColor="#8b5cf6" stopOpacity={0.6} />
+                  </linearGradient>
+                  <linearGradient id="barNormalGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#00f0ff" stopOpacity={0.85} />
+                    <stop offset="100%" stopColor="#3b82f6" stopOpacity={0.45} />
+                  </linearGradient>
+                  <linearGradient id="barMidGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#a855f7" stopOpacity={0.85} />
+                    <stop offset="100%" stopColor="#00f0ff" stopOpacity={0.45} />
+                  </linearGradient>
+                </defs>
                 <XAxis dataKey="band" stroke="#475569" fontSize={8} tickLine={false} />
                 <YAxis stroke="#475569" fontSize={9} domain={[0, 100]} tickLine={false} />
                 <Tooltip contentStyle={customTooltipStyle} />
-                <Bar dataKey="value" name="Anomalous Energy">
+                <Bar dataKey="value" name="Spectral Energy (%)" radius={[3, 3, 0, 0]}>
                   {frequencyData.map((entry, index) => {
-                    // Make bars higher risk turn crimson red, lower risk cyan
-                    const isHigh = entry.value > 50;
+                    const isHighEnergy = entry.value >= 70;
+                    const isMidEnergy = entry.value >= 40;
+                    
+                    let fillId = "url(#barNormalGrad)";
+                    if (isHighRisk || isHighEnergy) {
+                      fillId = "url(#barHighGrad)";
+                    } else if (isMidEnergy) {
+                      fillId = "url(#barMidGrad)";
+                    }
+
                     return (
                       <Cell 
                         key={`cell-${index}`} 
-                        fill={isHigh ? '#ff007f' : '#00f0ff'} 
-                        fillOpacity={isHigh ? 0.8 : 0.6}
+                        fill={fillId}
                       />
                     );
                   })}
