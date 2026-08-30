@@ -321,7 +321,14 @@ export default function Dashboard() {
                     </button>
                   </div>
                   <MetricGrid
-                    metrics={scanMode === 'ela' ? (results.ela_details || results.trust_metrics || {}) : (results.trust_metrics || {})}
+                    metrics={{
+                      ...results.trust_metrics,
+                      ...(scanMode === 'ela' && results.ela_details ? {
+                        tamper_score: results.ela_details.tamper_score,
+                        anomaly_pixels_pct: results.ela_details.anomaly_pixels_pct,
+                        tamper_status: results.ela_details.tamper_status
+                      } : {})
+                    }}
                     scanMode={scanMode}
                     deviceName={hardwareInfo.device_name}
                     hasAudio={results.has_audio}

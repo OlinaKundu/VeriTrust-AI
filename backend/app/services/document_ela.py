@@ -1,153 +1,329 @@
 import cv2
 import numpy as np
 import base64
-import os
 from PIL import Image
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, Any, Tuple
+from typing import Dict, Any
 
-def perform_ela(image_path: str | Path, quality: int = 95, scale: int = 20) -> Dict[str, Any]:
+
+def perform_ela(
+    image_path: str | Path,
+    quality: int = 90,
+    scale: int = 15,
+    patch_size: int = 128
+) -> Dict[str, Any]:
     """
-    Performs Error Level Analysis (ELA) on an image file.
+    Error Level Analysis (ELA) for image tampering detection.
+
     Returns:
-    {
-        "tamper_score": float,            # 0.0 - 1.0
-        "ela_image_b64": str,             # Base64 encoded ELA image for preview
-        "original_image_b64": str,        # Base64 encoded original image
-        "anomaly_pixels_pct": float,      # Percentage of highly anomalous pixels
-        "tamper_status": str              # "Authentic", "Suspicious", "Tampered"
-    }
+        tamper_score: 0.0 - 1.0
+        ela_image_b64: Base64 ELA visualization
+        original_image_b64: Base64 original image
+        anomaly_pixels_pct: Percentage of anomalous pixels
+        tamper_status: Authentic / Suspicious / Tampered
+
+    NOTE:
+        ELA produces a heuristic tamper-risk score.
+        It is NOT a mathematical probability of forgery.
     """
-    # If the file is a PDF, we try to convert it. 
-    # For robust execution without heavy system dependencies (like poppler for pdf2image),
-    # we check if pdf2image is available, or load a placeholder document image.
-    try:
-        # Check if PDF
-        suffix = Path(image_path).suffix.lower()
-        if suffix == ".pdf":
-            # PDF fallback: generate a mock document image containing some "scanned" text
-            # and fake tampered areas to simulate visual ELA on the document.
-            img = create_mock_document_image("PDF Document Verification")
-        else:
-            # Read standard image
-            img = cv2.imread(str(image_path))
-            if img is None:
-                raise ValueError("Could not read image using OpenCV.")
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    except Exception as e:
-        print(f"ELA Read Error ({e}). Generating placeholder document image.")
-        img = create_mock_document_image("Fallback Verification Document")
 
     try:
-        h, w, c = img.shape
-        
-        # Save as JPEG with specified quality
+        # ============================================================
+        # 1. READ IMAGE
+        # ============================================================
+
+        image_path = Path(image_path)
+
+        img = cv2.imread(str(image_path))
+
+        if img is None:
+            raise ValueError(
+                f"Unable to read image: {image_path}"
+            )
+
+        img = cv2.cvtColor(
+            img,
+            cv2.COLOR_BGR2RGB
+        )
+
+        h, w, _ = img.shape
+
+        # ============================================================
+        # 2. JPEG RECOMPRESSION
+        # ============================================================
+
         pil_img = Image.fromarray(img)
+
         buffer = BytesIO()
-        pil_img.save(buffer, format="JPEG", quality=quality)
+
+        pil_img.save(
+            buffer,
+            format="JPEG",
+            quality=quality
+        )
+
         buffer.seek(0)
+
+        resaved = Image.open(buffer).convert("RGB")
+
+        resaved_img = np.array(resaved)
+
+        # Safety resize
+        if resaved_img.shape != img.shape:
+
+            resaved_img = cv2.resize(
+                resaved_img,
+                (w, h),
+                interpolation=cv2.INTER_LINEAR
+            )
+
+        # ============================================================
+        # 3. ELA DIFFERENCE
+        # ============================================================
+
+        diff = cv2.absdiff(
+            img,
+            resaved_img
+        )
+
+        gray_diff = cv2.cvtColor(
+            diff,
+            cv2.COLOR_RGB2GRAY
+        )
+
+        # ============================================================
+        # 4. CREATE VISUAL ELA IMAGE
+        # ============================================================
+
+        ela_img = np.clip(
+            diff.astype(np.float32) * scale,
+            0,
+            255
+        ).astype(np.uint8)
+
+        # ============================================================
+        # 5. REMOVE VERY SMALL JPEG NOISE
+        # ============================================================
+
+        # Slight blur prevents individual noisy pixels from
+        # dominating the anomaly calculation.
+        smooth_diff = cv2.GaussianBlur(
+            gray_diff,
+            (3, 3),
+            0
+        )
+# ============================================================
+        # 6. ANOMALY MASK (Fixed: Removed MORPH_OPEN)
+        # ============================================================
+
+        # Lower threshold than your previous implementation.
+        threshold = 8
+
+        # Create binary mask (0 or 1)
+        anomaly_mask = (smooth_diff > threshold).astype(np.uint8)
+
+        # Removed cv2.morphologyEx. It was erasing the thin edge artifacts 
+        # that ELA relies on to detect pasted boundaries!
+
+        # ============================================================
+        # 7. GLOBAL ANOMALY %
+        # ============================================================
+
+        anomaly_pixels = np.sum(anomaly_mask > 0)
+        total_pixels = h * w
+        anomaly_pct = (anomaly_pixels / total_pixels) * 100.0
+
+        # ============================================================
+        # 8. ELA INTENSITY STATISTICS (Fixed: Lowered High-Error Threshold)
+        # ============================================================
+
+        mean_error = float(np.mean(gray_diff))
+        median_error = float(np.median(gray_diff))
+
+        # Changed from 20 to 12. A diff of 20 at Quality 90 is almost impossible 
+        # to achieve naturally, resulting in this score always being 0.
+        high_error_pixels = np.sum(gray_diff > 12) 
         
-        # Read the resaved JPEG
-        resaved_pil = Image.open(buffer)
-        resaved_img = np.array(resaved_pil)
+        high_error_pct = (high_error_pixels / total_pixels) * 100.0
+
+        # ============================================================
+        # 9. LOCALIZED ANOMALY DETECTION (Unchanged)
+        # ============================================================
         
-        # Calculate absolute difference
-        # We need both arrays to be of the same shape and size.
-        if img.shape != resaved_img.shape:
-            resaved_img = cv2.resize(resaved_img, (w, h))
-            
-        diff = cv2.absdiff(img, resaved_img)
-        
-        # Scale the difference image to enhance contrast
-        ela_img = diff * scale
-        ela_img = np.clip(ela_img, 0, 255).astype(np.uint8)
-        
-        # Calculate anomaly metric
-        # Count pixels where ELA difference is above a threshold
-        # Tampered regions have different JPEG compression ratios, leading to bright spikes in ELA.
-        gray_diff = cv2.cvtColor(diff, cv2.COLOR_RGB2GRAY)
-        threshold = 12
-        anomaly_pixels = np.sum(gray_diff > threshold)
-        total_pixels = w * h
-        anomaly_pct = float(anomaly_pixels / total_pixels)
-        
-        # Scale score: typical maximum anomaly percentage on real-world tampered JPEGs is around 5%-15%
-        # We normalize this to a 0.0 - 1.0 tamper score
-        tamper_score = min(1.0, anomaly_pct * 8.0)
-        
-        # If there are localized patches of high anomaly (high local variance), boost score
-        # Using a simple grid variance calculation
-        grid_h, grid_w = h // 8, w // 8
         max_local_anomaly = 0.0
-        if grid_h > 0 and grid_w > 0:
-            for i in range(8):
-                for j in range(8):
-                    patch = gray_diff[i*grid_h:(i+1)*grid_h, j*grid_w:(j+1)*grid_w]
-                    patch_anomaly = np.sum(patch > threshold) / patch.size
-                    max_local_anomaly = max(max_local_anomaly, patch_anomaly)
-            
-            # Boost score if we find heavily concentrated tampered regions (localized splicing)
-            if max_local_anomaly > 0.15:
-                tamper_score = max(tamper_score, min(1.0, max_local_anomaly * 1.5))
+        avg_local_anomaly = 0.0
+        patch_count = 0
 
-        # Convert ELA image to Base64
-        _, ela_buffer = cv2.imencode('.jpg', cv2.cvtColor(ela_img, cv2.COLOR_RGB2BGR))
-        ela_b64 = base64.b64encode(ela_buffer).decode('utf-8')
-        
-        # Convert original image to Base64
-        _, orig_buffer = cv2.imencode('.jpg', cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
-        orig_b64 = base64.b64encode(orig_buffer).decode('utf-8')
+        effective_patch = min(patch_size, h, w)
 
-        # Determine Status
-        if tamper_score < 0.25:
+        if effective_patch > 0:
+            step = max(1, effective_patch // 2)
+            for y in range(0, h - effective_patch + 1, step):
+                for x in range(0, w - effective_patch + 1, step):
+                    patch = anomaly_mask[y:y + effective_patch, x:x + effective_patch]
+
+                    if patch.size == 0:
+                        continue
+
+                    local_pct = (np.mean(patch > 0)) * 100.0
+                    max_local_anomaly = max(max_local_anomaly, local_pct)
+                    avg_local_anomaly += local_pct
+                    patch_count += 1
+
+        if patch_count > 0:
+            avg_local_anomaly /= patch_count
+
+        # ============================================================
+        # 10. NORMALIZE INDIVIDUAL SIGNALS (Fixed: Realistic Denominators)
+        # ============================================================
+
+        # If 4% of the whole image is tampered, that's highly suspicious. (Was 15.0)
+        global_score = np.clip(anomaly_pct / 4.0, 0.0, 1.0)
+
+        # If 2% of pixels have extreme errors, that's a red flag. (Was 5.0)
+        high_error_score = np.clip(high_error_pct / 2.0, 0.0, 1.0)
+
+        # If a single patch is 15% anomalous, it's likely a pasted object. (Was 30.0)
+        local_score = np.clip(max_local_anomaly / 15.0, 0.0, 1.0)
+
+        # Mean ELA is usually around 2-4. If it approaches 8, it's heavily modified. (Was 15.0)
+        mean_score = np.clip(mean_error / 8.0, 0.0, 1.0)
+
+        # ============================================================
+        # 11. COMBINE SIGNALS
+        # ============================================================
+
+        tamper_score = (
+            global_score * 0.30 +
+            high_error_score * 0.25 +
+            local_score * 0.30 +
+            mean_score * 0.15
+        )
+
+        tamper_score = float(
+            np.clip(
+                tamper_score,
+                0.0,
+                1.0
+            )
+        )
+
+        # ============================================================
+        # 12. CLASSIFICATION
+        # ============================================================
+
+        if tamper_score < 0.30:
+
             status = "Authentic"
+
         elif tamper_score < 0.60:
+
             status = "Suspicious"
+
         else:
+
             status = "Tampered"
 
+        # ============================================================
+        # 13. BASE64 ELA IMAGE
+        # ============================================================
+
+        success, ela_buffer = cv2.imencode(
+            ".jpg",
+            cv2.cvtColor(
+                ela_img,
+                cv2.COLOR_RGB2BGR
+            )
+        )
+
+        if not success:
+            raise ValueError(
+                "Could not encode ELA image."
+            )
+
+        ela_b64 = base64.b64encode(
+            ela_buffer
+        ).decode("utf-8")
+
+        # ============================================================
+        # 14. BASE64 ORIGINAL IMAGE
+        # ============================================================
+
+        success, orig_buffer = cv2.imencode(
+            ".jpg",
+            cv2.cvtColor(
+                img,
+                cv2.COLOR_RGB2BGR
+            )
+        )
+
+        if not success:
+            raise ValueError(
+                "Could not encode original image."
+            )
+
+        orig_b64 = base64.b64encode(
+            orig_buffer
+        ).decode("utf-8")
+
+        # ============================================================
+        # 15. RETURN
+        # ============================================================
+
         return {
-            "tamper_score": float(tamper_score),
+            "tamper_score": round(
+                tamper_score,
+                4
+            ),
+
             "ela_image_b64": ela_b64,
+
             "original_image_b64": orig_b64,
-            "anomaly_pixels_pct": float(anomaly_pct * 100),
-            "tamper_status": status
+
+            "anomaly_pixels_pct": round(
+                anomaly_pct,
+                4
+            ),
+
+            "tamper_status": status,
+
+            # Extra debugging information
+            "ela_mean_error": round(
+                mean_error,
+                4
+            ),
+
+            "ela_median_error": round(
+                median_error,
+                4
+            ),
+
+            "high_error_pixels_pct": round(
+                high_error_pct,
+                4
+            ),
+
+            "max_local_anomaly_pct": round(
+                max_local_anomaly,
+                4
+            )
         }
 
     except Exception as e:
-        print(f"Error executing ELA: {e}")
-        # Return fallback mock result
+
+        print(
+            f"ELA Error: {e}"
+        )
+
         return {
-            "tamper_score": 0.05,
+            "tamper_score": 0.0,
             "ela_image_b64": "",
             "original_image_b64": "",
-            "anomaly_pixels_pct": 0.2,
-            "tamper_status": "Error"
+            "anomaly_pixels_pct": 0.0,
+            "tamper_status": "Error",
+            "ela_mean_error": 0.0,
+            "ela_median_error": 0.0,
+            "high_error_pixels_pct": 0.0,
+            "max_local_anomaly_pct": 0.0
         }
-
-def create_mock_document_image(title: str) -> np.ndarray:
-    """
-    Creates a simulated document image (e.g. an ID card or bank statement)
-    with highlighted simulated ELA anomalies.
-    """
-    # Create white canvas
-    img = np.ones((500, 700, 3), dtype=np.uint8) * 245
-    
-    # Draw simple document lines (mock ID card)
-    cv2.rectangle(img, (30, 30), (670, 470), (40, 40, 40), 2)
-    cv2.rectangle(img, (50, 60), (200, 240), (180, 180, 180), -1) # Photo area
-    cv2.putText(img, "VERITRUST SECURITY CARD", (220, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 20, 20), 2)
-    cv2.putText(img, "ID: VT-2026-8942-EL", (220, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (50, 50, 50), 1)
-    cv2.putText(img, "NAME: John Doe", (220, 170), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (50, 50, 50), 1)
-    cv2.putText(img, "STATUS: PENDING", (220, 210), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (20, 20, 180), 2)
-    
-    # Add a mock "watermark" or signature
-    cv2.putText(img, "SECURE VERIFIED DOCUMENT", (150, 350), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200, 200, 200), 2)
-
-    # Let's add a "spliced" text block that will trigger a mock ELA anomaly
-    # Spliced text looks different/newer
-    cv2.putText(img, "EXPIRY: 2035-12-31", (220, 250), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-
-    # Convert to RGB
-    return img
