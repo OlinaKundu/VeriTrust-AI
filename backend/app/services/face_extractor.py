@@ -16,8 +16,8 @@ try:
     device = info["device"]
     mtcnn = MTCNN(
         keep_all=True,
-        min_face_size=55,
-        thresholds=[0.80, 0.85, 0.92],
+        min_face_size=32,
+        thresholds=[0.70, 0.80, 0.85],
         device=device
     )
     HAS_FACENET = True
@@ -104,10 +104,9 @@ def extract_keyframes_and_faces(video_path: str | Path, max_frames: int = 10) ->
 
 def detect_faces(image_rgb: np.ndarray) -> Tuple[List[List[int]], List[np.ndarray], bool]:
     """
-    Detects genuine human faces in an RGB image using GPU MTCNN with landmark & texture validation.
-    Filters out false positive object crops (arms, blurry walls, flat textures).
+    Detects genuine human faces in an RGB image using GPU MTCNN with coordinate clamping and texture validation.
     Returns:
-    - bboxes: List of [x, y, w, h]
+    - bboxes: List of [x, y, w, h] pixel coordinates tightly bounded to face region
     - cropped_faces: List of 224x224 RGB face crops
     - has_faces: True if genuine faces were found, False otherwise
     """
@@ -120,48 +119,57 @@ def detect_faces(image_rgb: np.ndarray) -> Tuple[List[List[int]], List[np.ndarra
             boxes, probs, landmarks = mtcnn.detect(image_rgb, landmarks=True)
             if boxes is not None and probs is not None:
                 for b, p, lm in zip(boxes, probs, landmarks):
-                    if p is None or p < 0.90:
+                    if p is None or p < 0.85:
                         continue
                         
                     bx1, by1, bx2, by2 = [int(coord) for coord in b]
-                    bx1, by1 = max(0, bx1), max(0, by1)
-                    bx2, by2 = min(w, bx2), min(h, by2)
                     fw, fh = bx2 - bx1, by2 - by1
                     
-                    if fw < 45 or fh < 45:
+                    if fw < 28 or fh < 28:
                         continue
                         
                     aspect = fw / (fh + 1e-5)
-                    if aspect < 0.55 or aspect > 1.45:
+                    if aspect < 0.50 or aspect > 1.60:
                         continue
                         
-                    # Crop face region
-                    raw_crop = image_rgb[by1:by2, bx1:bx2]
+                    # Calculate strictly visible bounds inside image frame
+                    vis_x1 = max(0, bx1)
+                    vis_y1 = max(0, by1)
+                    vis_x2 = min(w, bx2)
+                    vis_y2 = min(h, by2)
+                    vis_w = max(0, vis_x2 - vis_x1)
+                    vis_h = max(0, vis_y2 - vis_y1)
+                    
+                    if (vis_w * vis_h) / (fw * fh + 1e-5) < 0.55:
+                        continue # Skip boxes mostly outside viewport
+                        
+                    raw_crop = image_rgb[vis_y1:vis_y2, vis_x1:vis_x2]
                     if raw_crop.size == 0:
                         continue
                         
-                    # Check texture gradient complexity (eliminates flat blurry patches like arms/walls)
+                    # Texture complexity filter (eliminates flat plain walls / tables)
                     gray_crop = cv2.cvtColor(raw_crop, cv2.COLOR_RGB2GRAY)
                     lap_var = float(cv2.Laplacian(gray_crop, cv2.CV_64F).var())
-                    if lap_var < 40.0:
+                    if lap_var < 22.0:
                         continue
                         
-                    # Anatomical confirmation via Cascade
-                    f_faces = face_cascade.detectMultiScale(gray_crop, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30))
-                    p_faces = profile_cascade.detectMultiScale(gray_crop, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30))
-                    if len(f_faces) == 0 and len(p_faces) == 0:
-                        continue
+                    # Facial landmark distance check
+                    if lm is not None and len(lm) >= 5:
+                        eye_dist = np.linalg.norm(lm[0] - lm[1])
+                        eye_to_mouth = np.linalg.norm((lm[0] + lm[1])/2 - (lm[3] + lm[4])/2)
+                        if eye_dist < 6 or eye_to_mouth < 8:
+                            continue
                     
-                    # Store original detection box for UI display
-                    bboxes.append([bx1, by1, fw, fh])
+                    # Store accurate visible detection box [x, y, w, h]
+                    bboxes.append([vis_x1, vis_y1, vis_w, vis_h])
                     
-                    # Expand crop by 50% for contextual portrait analysis (hair, ears, jawline, background)
-                    pad_w = int(fw * 0.50)
-                    pad_h = int(fh * 0.50)
-                    cx1 = max(0, bx1 - pad_w)
-                    cy1 = max(0, by1 - pad_h)
-                    cx2 = min(w, bx2 + pad_w)
-                    cy2 = min(h, by2 + pad_h)
+                    # Expand crop by 40% for contextual portrait analysis (hair, jawline, ears)
+                    pad_w = int(vis_w * 0.40)
+                    pad_h = int(vis_h * 0.40)
+                    cx1 = max(0, vis_x1 - pad_w)
+                    cy1 = max(0, vis_y1 - pad_h)
+                    cx2 = min(w, vis_x2 + pad_w)
+                    cy2 = min(h, vis_y2 + pad_h)
                     
                     if cx2 > cx1 and cy2 > cy1:
                         face = image_rgb[cy1:cy2, cx1:cx2]
@@ -175,19 +183,19 @@ def detect_faces(image_rgb: np.ndarray) -> Tuple[List[List[int]], List[np.ndarra
     if face_cascade is not None and not face_cascade.empty():
         try:
             gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
-            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(45, 45))
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(35, 35))
             for (x, y, fw, fh) in faces:
                 raw_crop = image_rgb[y:y+fh, x:x+fw]
                 if raw_crop.size == 0:
                     continue
                 gray_crop = cv2.cvtColor(raw_crop, cv2.COLOR_RGB2GRAY)
                 lap_var = float(cv2.Laplacian(gray_crop, cv2.CV_64F).var())
-                if lap_var < 40.0:
+                if lap_var < 25.0:
                     continue
 
                 bboxes.append([int(x), int(y), int(fw), int(fh)])
-                pad_w = int(fw * 0.50)
-                pad_h = int(fh * 0.50)
+                pad_w = int(fw * 0.40)
+                pad_h = int(fh * 0.40)
                 cx1 = max(0, x - pad_w)
                 cy1 = max(0, y - pad_h)
                 cx2 = min(w, x + fw + pad_w)
