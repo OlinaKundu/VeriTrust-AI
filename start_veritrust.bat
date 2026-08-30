@@ -1,5 +1,6 @@
 @echo off
 title VeriTrust AI Launcher
+cd /d "%~dp0"
 echo ==================================================
 echo         VERITRUST AI: FORENSIC PLATFORM          
 echo ==================================================
