@@ -36,22 +36,35 @@ def warmup_vit(target_device: str = "cuda:0") -> Dict[str, Any]:
         # 1. Face Deepfake Specialists
         face_model_name = "dima806/deepfake_vs_real_image_detection"
         print(f"[WARMUP]: Loading face deepfake detector {face_model_name} onto {device}...")
-        processor = ViTImageProcessor.from_pretrained(face_model_name, token=token, local_files_only=False)
-        vit_model = ViTForImageClassification.from_pretrained(face_model_name, token=token, local_files_only=False).to(device)
+        try:
+            processor = ViTImageProcessor.from_pretrained(face_model_name, token=token, local_files_only=True)
+            vit_model = ViTForImageClassification.from_pretrained(face_model_name, token=token, local_files_only=True).to(device)
+        except Exception:
+            processor = ViTImageProcessor.from_pretrained(face_model_name, token=token, local_files_only=False)
+            vit_model = ViTForImageClassification.from_pretrained(face_model_name, token=token, local_files_only=False).to(device)
         vit_model.eval()
         
         wvolf_name = "Wvolf/ViT_Deepfake_Detection"
         print(f"[WARMUP]: Loading consensus face detector {wvolf_name} onto {device}...")
-        wvolf_processor = AutoImageProcessor.from_pretrained(wvolf_name, token=token, local_files_only=False)
-        wvolf_model = AutoModelForImageClassification.from_pretrained(wvolf_name, token=token, local_files_only=False).to(device)
+        try:
+            wvolf_processor = AutoImageProcessor.from_pretrained(wvolf_name, token=token, local_files_only=True)
+            wvolf_model = AutoModelForImageClassification.from_pretrained(wvolf_name, token=token, local_files_only=True).to(device)
+        except Exception:
+            wvolf_processor = AutoImageProcessor.from_pretrained(wvolf_name, token=token, local_files_only=False)
+            wvolf_model = AutoModelForImageClassification.from_pretrained(wvolf_name, token=token, local_files_only=False).to(device)
         wvolf_model.eval()
         
         # 2. General AI / Diffusion Scene Specialist
-        gen_model_name = "umm-maybe/AI-image-detector"
-        print(f"[WARMUP]: Loading general AI detector {gen_model_name} onto {device}...")
-        general_ai_processor = AutoImageProcessor.from_pretrained(gen_model_name, token=token, local_files_only=False)
-        general_ai_model = AutoModelForImageClassification.from_pretrained(gen_model_name, token=token, local_files_only=False).to(device)
-        general_ai_model.eval()
+        try:
+            gen_model_name = "umm-maybe/AI-image-detector"
+            general_ai_processor = AutoImageProcessor.from_pretrained(gen_model_name, token=token, local_files_only=True)
+            general_ai_model = AutoModelForImageClassification.from_pretrained(gen_model_name, token=token, local_files_only=True).to(device)
+            general_ai_model.eval()
+            print(f"[WARMUP]: General AI detector {gen_model_name} loaded onto {device}.")
+        except Exception:
+            print(f"[WARMUP]: umm-maybe using HuggingFace API ensemble & calibrated forensics.")
+            general_ai_model = None
+            general_ai_processor = None
         
         # Setup Grad-CAM if available
         try:
@@ -69,7 +82,8 @@ def warmup_vit(target_device: str = "cuda:0") -> Dict[str, Any]:
                 with torch.no_grad():
                     _ = vit_model(dummy_pixels)
                     _ = wvolf_model(dummy_pixels)
-                    _ = general_ai_model(dummy_pixels)
+                    if general_ai_model is not None:
+                        _ = general_ai_model(dummy_pixels)
             print(f"[WARMUP]: Local GPU Vision Transformers compiled on {info['device_name']}")
 
         HAS_VIT = True
@@ -256,9 +270,8 @@ def run_local_batch_face_vit_inference(face_imgs: List[np.ndarray], model_bundle
                     probs_2 = torch.softmax(logits_2, dim=-1)
                     wvolf_scores = [float(probs_2[i, 1].item()) for i in range(len(face_imgs))]
                     
-            # Geometric consensus ensemble: protects against single-model false positives on authentic crops
-            import math
-            final_scores = [float(math.sqrt(max(1e-6, dima_scores[i] * wvolf_scores[i]))) for i in range(len(face_imgs))]
+            # Max activation across dual neural face models: if either detector identifies deepfake patterns, reflect the higher confidence
+            final_scores = [float(max(dima_scores[i], wvolf_scores[i])) for i in range(len(face_imgs))]
             return final_scores
         else:
             return dima_scores
@@ -272,6 +285,10 @@ def analyze_face_frame(face_img: np.ndarray, model_bundle: Dict[str, Any] = None
     """
     scores = run_local_batch_face_vit_inference([face_img], model_bundle)
     score = scores[0] if scores else 0.05
+    crop_forensics = compute_ai_generation_forensics(face_img)
+    max_crop_phys = max(crop_forensics.values()) if crop_forensics else 0.03
+    if max_crop_phys > 0.30:
+        score = max(score, max_crop_phys)
     heatmap = generate_calibrated_heatmap(face_img, score, size=28)
     return score, heatmap
 
@@ -308,32 +325,45 @@ def analyze_full_frame_and_faces(
 ) -> Dict[str, Any]:
     """
     Dual-Track Vision Analysis on Local GPU:
-    - Track 1: Evaluates whole-scene generative AI (Midjourney, DALL-E, Diffusion) with local GPU umm-maybe.
+    - Track 1: Evaluates whole-scene generative AI (Midjourney, DALL-E, Diffusion) with local GPU and spatial signal forensics.
     - Track 2: Figures out and crops each face; executes batched GPU deepfake inference across all cropped faces.
-    - Smooth Proportional Fusion: Fuses full-scene AI generation score with individual face deepfake probabilities.
+    - Accurate Proportional Fusion: Fuses full-scene AI generation score with individual face deepfake probabilities.
     """
-    # 1. Local GPU General AI detection on full frame
+    # 1. Local GPU General AI detection on full frame (umm-maybe)
     local_general_ai = run_local_general_ai_inference(frame_rgb, model_bundle)
     
     if local_general_ai is None:
         hf_full_res = query_hf_ensemble(frame_rgb, is_face_crop=False)
-        full_ai_score = hf_full_res.get("ensemble_fake_score", 0.05)
+        full_ai_score = hf_full_res.get("ensemble_fake_score")
+        if full_ai_score is None:
+            full_ai_score = 0.05
     else:
         full_ai_score = local_general_ai
+
+    if full_ai_score is None:
+        full_ai_score = 0.05
+        
+    full_ai_score = float(full_ai_score)
 
     # 2. Local GPU Face ViT detection on full frame (as holistic context)
     local_face_on_full = run_local_vit_inference(frame_rgb, model_bundle)
     
-    # 3. Batch crop inference on all detected faces
+    # 3. Batch crop inference on all detected faces (dima806 + Wvolf)
     face_results = []
     face_scores = []
     has_faces = len(faces) > 0
     
     if has_faces:
-        # Perform single batched tensor pass across all cropped faces
         batch_scores = run_local_batch_face_vit_inference(faces, model_bundle)
         for idx, face_crop in enumerate(faces):
-            f_score = batch_scores[idx] if idx < len(batch_scores) else 0.05
+            s = batch_scores[idx] if (idx < len(batch_scores) and batch_scores[idx] is not None) else 0.05
+            
+            # If whole image is strongly AI generated (umm-maybe >= 0.65), reflect AI generation on face
+            if full_ai_score >= 0.65:
+                f_score = float(max(s, ((full_ai_score - 0.65) / 0.35) * 0.50 + 0.50))
+            else:
+                f_score = float(s)
+                
             f_heatmap = generate_calibrated_heatmap(face_crop, f_score, size=28)
             face_scores.append(f_score)
             face_results.append({
@@ -341,27 +371,18 @@ def analyze_full_frame_and_faces(
                 "heatmap": f_heatmap
             })
             
-    # Continuous calibrated risk scaling
-    # umm-maybe boundary is 0.55 (Real <= 0.55, AI > 0.55)
-    if full_ai_score <= 0.55:
-        ai_risk = max(0.03, (full_ai_score / 0.55) * 0.15)
+    # Continuous calibrated risk scaling for umm-maybe:
+    # Score < 0.55: Authentic Human Photograph (scaled to 0.02 - 0.15)
+    # Score >= 0.55: Synthetic AI Generated (scaled to 0.50 - 0.99)
+    if full_ai_score < 0.55:
+        ai_risk = max(0.02, (full_ai_score / 0.55) * 0.15)
     else:
-        ai_risk = 0.15 + ((full_ai_score - 0.55) / 0.45) * 0.85
+        ai_risk = 0.50 + ((full_ai_score - 0.55) / 0.45) * 0.49
 
-    # 4. Proportional Consensus Fusion across full scene and all batch-cropped faces
+    # 4. Final Risk Determination
     if has_faces and face_scores:
-        calibrated_face_scores = []
-        for s in face_scores:
-            if s <= 0.08:
-                calibrated_face_scores.append(max(0.02, (s / 0.08) * 0.09))
-            else:
-                calibrated_face_scores.append(0.10 + ((s - 0.08) / 0.92) * 0.90)
-                
-        avg_face_risk = float(np.mean(calibrated_face_scores))
-        max_face_risk = float(np.max(calibrated_face_scores))
-        
-        face_risk = (max_face_risk * 0.85) + (avg_face_risk * 0.15)
-        final_risk = max(ai_risk, face_risk)
+        max_face_risk = float(np.max(face_scores))
+        final_risk = max(ai_risk, max_face_risk)
     else:
         final_risk = ai_risk
 
@@ -376,8 +397,8 @@ def analyze_full_frame_and_faces(
         "faces_data": face_results,
         "full_heatmap": full_heatmap,
         "hf_model_breakdown": {
-            "general_ai_gpu": round(full_ai_score, 4),
-            "max_face_deepfake_gpu": round(max(face_scores), 4) if has_faces else None,
+            "general_ai_gpu": round(full_ai_score, 4) if full_ai_score is not None else 0.05,
+            "max_face_deepfake_gpu": round(max(face_scores), 4) if (has_faces and face_scores and max(face_scores) is not None) else None,
             "faces_analyzed_count": len(faces)
         }
     }

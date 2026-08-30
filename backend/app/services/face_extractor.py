@@ -140,8 +140,8 @@ def detect_faces(image_rgb: np.ndarray) -> Tuple[List[List[int]], List[np.ndarra
                     vis_w = max(0, vis_x2 - vis_x1)
                     vis_h = max(0, vis_y2 - vis_y1)
                     
-                    if (vis_w * vis_h) / (fw * fh + 1e-5) < 0.55:
-                        continue # Skip boxes mostly outside viewport
+                    if (vis_w * vis_h) / (fw * fh + 1e-5) < 0.78:
+                        continue # Skip sliced border partial faces
                         
                     raw_crop = image_rgb[vis_y1:vis_y2, vis_x1:vis_x2]
                     if raw_crop.size == 0:
@@ -183,19 +183,22 @@ def detect_faces(image_rgb: np.ndarray) -> Tuple[List[List[int]], List[np.ndarra
     if face_cascade is not None and not face_cascade.empty():
         try:
             gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
-            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(35, 35))
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=7, minSize=(60, 60))
             for (x, y, fw, fh) in faces:
+                aspect = fw / (fh + 1e-5)
+                if aspect < 0.70 or aspect > 1.35:
+                    continue  # Human faces are oval/square, reject rectangular fingers/objects
                 raw_crop = image_rgb[y:y+fh, x:x+fw]
                 if raw_crop.size == 0:
                     continue
                 gray_crop = cv2.cvtColor(raw_crop, cv2.COLOR_RGB2GRAY)
                 lap_var = float(cv2.Laplacian(gray_crop, cv2.CV_64F).var())
-                if lap_var < 25.0:
+                if lap_var < 35.0:
                     continue
 
                 bboxes.append([int(x), int(y), int(fw), int(fh)])
-                pad_w = int(fw * 0.40)
-                pad_h = int(fh * 0.40)
+                pad_w = int(fw * 0.35)
+                pad_h = int(fh * 0.35)
                 cx1 = max(0, x - pad_w)
                 cy1 = max(0, y - pad_h)
                 cx2 = min(w, x + fw + pad_w)

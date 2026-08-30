@@ -256,8 +256,15 @@ async def run_pipeline_sync(
                 "model_breakdown": analysis.get("hf_model_breakdown", {})
             })
             
-        avg_vision_risk = float(np.mean(vision_scores)) if vision_scores else 0.05
-        avg_spatial_anomaly = float(np.mean(spatial_anomalies)) if spatial_anomalies else 0.05
+        all_face_scores = [f["confidence_score"] for frame in frame_diagnostics for f in frame.get("faces", []) if f.get("confidence_score") is not None]
+        has_face_deepfake = any(s >= 0.60 for s in all_face_scores)
+        has_ai_generation = any(s >= 0.55 for s in vision_scores)
+        
+        if has_face_deepfake or has_ai_generation:
+            avg_vision_risk = float(np.max(vision_scores))
+        else:
+            avg_vision_risk = float(np.mean(vision_scores)) if vision_scores else 0.05
+        avg_spatial_anomaly = float(avg_vision_risk * 0.75)
         
         temp_audio_path = get_temp_path(".wav")
         audio_extracted = extract_audio_from_video(file_path, temp_audio_path)
@@ -407,8 +414,15 @@ async def run_full_pipeline_ws(websocket: WebSocket, file_path: Path, models: Di
         })
         await asyncio.sleep(0.15)
 
-    avg_vision_risk = float(np.mean(vision_scores)) if vision_scores else 0.05
-    avg_spatial_anomaly = float(np.mean(spatial_anomalies)) if spatial_anomalies else 0.05
+    all_face_scores = [f["confidence_score"] for frame in frame_diagnostics for f in frame.get("faces", []) if f.get("confidence_score") is not None]
+    has_face_deepfake = any(s >= 0.60 for s in all_face_scores)
+    has_ai_generation = any(s >= 0.55 for s in vision_scores)
+    
+    if has_face_deepfake or has_ai_generation:
+        avg_vision_risk = float(np.max(vision_scores))
+    else:
+        avg_vision_risk = float(np.mean(vision_scores)) if vision_scores else 0.05
+    avg_spatial_anomaly = float(avg_vision_risk * 0.75)
 
     await websocket.send_json({"status": "Scanning audio spectrum via Wav2Vec2 on CUDA...", "progress": 75})
     

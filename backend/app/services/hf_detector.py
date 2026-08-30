@@ -147,11 +147,9 @@ def query_hf_ensemble(img_rgb: np.ndarray, is_face_crop: bool = False) -> Dict[s
             HF_MODELS["wvolf_deepfake"]: 0.40
         }
     else:
-        models = [HF_MODELS["general_ai"], HF_MODELS["face_deepfake"], HF_MODELS["wvolf_deepfake"]]
+        models = [HF_MODELS["general_ai"]]
         model_weights = {
-            HF_MODELS["general_ai"]: 0.75,
-            HF_MODELS["face_deepfake"]: 0.15,
-            HF_MODELS["wvolf_deepfake"]: 0.10
+            HF_MODELS["general_ai"]: 1.0
         }
         
     results = {}
@@ -177,7 +175,7 @@ def query_hf_ensemble(img_rgb: np.ndarray, is_face_crop: bool = False) -> Dict[s
         
     return {
         "success": False,
-        "ensemble_fake_score": None,
+        "ensemble_fake_score": 0.05,
         "models_queried": {},
         "valid_model_count": 0
     }
