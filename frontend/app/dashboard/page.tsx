@@ -9,6 +9,7 @@ import MetricGrid from './components/MetricGrid';
 import VisualDiagnostics from './components/VisualDiagnostics';
 import AudioAnalytics from './components/AudioAnalytics';
 import StatusLogs from './components/StatusLogs';
+import BackendLoader from './components/BackendLoader';
 
 export default function Dashboard() {
   const [fileId, setFileId] = useState<string | null>(null);
@@ -16,6 +17,13 @@ export default function Dashboard() {
   const [fileType, setFileType] = useState<string | null>(null);
   const [scanMode, setScanMode] = useState<'full' | 'ela'>('full');
   
+  // Backend readiness & health check state
+  const [backendReady, setBackendReady] = useState(false);
+  const [backendStatus, setBackendStatus] = useState('Connecting to VeriTrust Core...');
+  const [backendError, setBackendError] = useState<string | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
+  const [isCheckingBackend, setIsCheckingBackend] = useState(true);
+
   // Hardware status
   const [hardwareInfo, setHardwareInfo] = useState<{
     device_name: string;
@@ -35,8 +43,8 @@ export default function Dashboard() {
   const [results, setResults] = useState<any | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Fetch Hardware status from FastAPI on mount
-  useEffect(() => {
+  const checkBackendHealth = async () => {
+    setIsCheckingBackend(true);
     let apiUrl = process.env.NEXT_PUBLIC_API_URL;
     if (apiUrl === undefined) {
       if (typeof window !== 'undefined' && window.location.port === '3000') {
@@ -45,17 +53,49 @@ export default function Dashboard() {
         apiUrl = '';
       }
     }
-    fetch(`${apiUrl}/api/v1/system/gpu`)
-      .then((res) => res.json())
-      .then((data) => {
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      const res = await fetch(`${apiUrl}/api/v1/system/gpu`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      if (res.ok) {
+        const data = await res.json();
         if (data && data.device_name) {
           setHardwareInfo(data);
         }
-      })
-      .catch((err) => {
-        console.log("Using default CUDA profile: ", err);
-      });
-  }, []);
+        setBackendStatus('Operational');
+        setBackendReady(true);
+        setBackendError(null);
+      } else {
+        setBackendError(`Backend returned status ${res.status}`);
+        setBackendReady(false);
+      }
+    } catch (err: any) {
+      setBackendError('Backend offline. Waiting for FastAPI service on port 8000...');
+      setBackendReady(false);
+    } finally {
+      setIsCheckingBackend(false);
+    }
+  };
+
+  // Poll backend health until fully operational
+  useEffect(() => {
+    checkBackendHealth();
+    const interval = setInterval(() => {
+      if (!backendReady) {
+        setRetryCount((prev) => prev + 1);
+        checkBackendHealth();
+      }
+    }, 2500);
+
+    return () => clearInterval(interval);
+  }, [backendReady]);
 
   // Auto-switch mode based on file type
   useEffect(() => {
@@ -211,7 +251,18 @@ export default function Dashboard() {
   };
 
   return (
-    <main className="min-h-screen bg-background-dark text-foreground px-4 md:px-8 py-6 flex flex-col space-y-6 relative selection:bg-primary/30 selection:text-white">
+    <>
+      {!backendReady && (
+        <BackendLoader
+          statusMessage={backendStatus}
+          retryCount={retryCount}
+          isConnecting={isCheckingBackend}
+          onRetry={checkBackendHealth}
+          error={backendError}
+        />
+      )}
+
+      <main className="min-h-screen bg-background-dark text-foreground px-4 md:px-8 py-6 flex flex-col space-y-6 relative selection:bg-primary/30 selection:text-white">
       <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-primary via-secondary to-success shadow-[0_0_12px_#00f0ff]" />
 
       <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-white/5 pb-4 mt-2">
@@ -346,7 +397,7 @@ export default function Dashboard() {
                     frames={[{
                       frame_index: 0,
                       timestamp: 0,
-                      bounding_boxes: [],
+                      bounding_boxes: results.ela_details.bounding_boxes || [],
                       faces: [],
                       original_image_b64: results.ela_details.original_image_b64,
                       ela_image_b64: results.ela_details.ela_image_b64
@@ -403,5 +454,6 @@ export default function Dashboard() {
         </div>
       </div>
     </main>
+    </>
   );
 }

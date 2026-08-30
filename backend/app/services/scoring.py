@@ -47,15 +47,25 @@ def calculate_trust_score(
 
     # Weighted risk calculation
     effective_a_risk = a_risk if a_risk is not None else 0.0
-    weighted_risk = (v_risk * w_v + effective_a_risk * w_a + s_anomaly * w_s) * 100.0
+    raw_risk = (v_risk * w_v + effective_a_risk * w_a + s_anomaly * w_s)
     
-    # Dominant risk penalty: prevent dilution if one modality shows extreme tampering (> 0.85)
+    # Dominant risk penalty: prevent dilution if one modality shows extreme tampering (> 0.70)
     max_single_risk = max(v_risk, effective_a_risk if a_risk is not None else 0.0, s_anomaly)
-    if max_single_risk > 0.85:
-        critical_penalty = (max_single_risk - 0.85) * 40.0
-        weighted_risk = min(100.0, weighted_risk + critical_penalty)
+    if max_single_risk > 0.70:
+        raw_risk = max(raw_risk, max_single_risk)
 
-    trust_score = max(0.0, min(100.0, 100.0 - weighted_risk))
+    # Calibrated non-linear forensic trust scoring curve:
+    # 0.00 - 0.16 Risk -> 85.0% - 100.0% Trust (Authentic)
+    # 0.16 - 0.30 Risk -> 55.0% - 84.9% Trust (Suspicious)
+    # > 0.30 Risk     -> 0.0% - 54.9% Trust (Deepfake / Tampered)
+    if raw_risk <= 0.16:
+        trust_score = 100.0 - (raw_risk / 0.16) * 15.0
+    elif raw_risk <= 0.30:
+        trust_score = 85.0 - ((raw_risk - 0.16) / 0.14) * 30.0
+    else:
+        trust_score = max(0.0, 55.0 - ((raw_risk - 0.30) / 0.70) * 55.0)
+
+    trust_score = max(0.0, min(100.0, trust_score))
 
     # Categorize verdict & severity
     if trust_score >= 80.0:

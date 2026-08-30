@@ -14,6 +14,7 @@ interface FrameDiagnostic {
   timestamp: number;
   bounding_boxes: number[][]; // [x, y, w, h]
   faces: FaceData[];
+  full_heatmap?: number[][]; // 28x28 grid representing the full frame anomaly map
   frame_b64?: string; // base64 of full frame
   original_image_b64?: string; // base64 of original doc if ELA
   ela_image_b64?: string; // base64 of ELA if ELA
@@ -28,6 +29,7 @@ export default function VisualDiagnostics({ frames, scanMode }: VisualDiagnostic
   const [currentFrameIdx, setCurrentFrameIdx] = useState(0);
   const [showHeatmap, setShowHeatmap] = useState(true);
   const [showBoxes, setShowBoxes] = useState(true);
+  const [heatmapScope, setHeatmapScope] = useState<'face' | 'full'>('face');
   const [opacity, setOpacity] = useState(0.65);
   
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -64,7 +66,7 @@ export default function VisualDiagnostics({ frames, scanMode }: VisualDiagnostic
       imageLoadedRef.current = true;
       drawCanvas();
     };
-  }, [currentFrameIdx, showHeatmap, showBoxes, opacity, scanMode, frames]);
+  }, [currentFrameIdx, showHeatmap, showBoxes, heatmapScope, opacity, scanMode, frames]);
 
   const drawCanvas = () => {
     const canvas = canvasRef.current;
@@ -74,56 +76,30 @@ export default function VisualDiagnostics({ frames, scanMode }: VisualDiagnostic
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Set canvas dimensions relative to bounding container width
-    const containerWidth = canvas.parentElement?.clientWidth || 640;
-    const aspectRatio = img.height / img.width;
-    canvas.width = containerWidth;
-    canvas.height = containerWidth * aspectRatio;
+    // Use native image resolution for 1:1 pixel accuracy
+    canvas.width = img.naturalWidth || img.width;
+    canvas.height = img.naturalHeight || img.height;
 
-    // Draw main frame image
+    // 1. Draw main frame image
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-    // If ELA mode, we don't draw face bounding boxes or Grad-CAM maps
+    // If ELA mode, draw detected tampered/spliced region bounding boxes if present
     if (scanMode === 'ela') {
-      return;
-    }
+      if (showBoxes && currentFrame.bounding_boxes && currentFrame.bounding_boxes.length > 0) {
+        currentFrame.bounding_boxes.forEach((box, index) => {
+          const [sx, sy, sw, sh] = box;
+          const borderStyle = '#ff007f'; // Crimson for spliced anomaly
 
-    // Draw bounding boxes & heatmaps
-    if (currentFrame.bounding_boxes && currentFrame.bounding_boxes.length > 0) {
-      currentFrame.bounding_boxes.forEach((box, index) => {
-        const [bx, by, bw, bh] = box;
-        
-        // Scale box coordinates to canvas scale factor
-        const scaleX = canvas.width / img.width;
-        const scaleY = canvas.height / img.height;
-        const sx = bx * scaleX;
-        const sy = by * scaleY;
-        const sw = bw * scaleX;
-        const sh = bh * scaleY;
-
-        // 1. Draw Grad-CAM heatmap over the face region if toggle enabled
-        const faceData = currentFrame.faces?.[index];
-        if (showHeatmap && faceData && faceData.heatmap) {
-          drawHeatmapOnFace(ctx, faceData.heatmap, sx, sy, sw, sh, opacity);
-        }
-
-        // 2. Draw Face Bounding Box outline
-        if (showBoxes) {
-          const score = faceData?.confidence_score || 0;
-          const isFake = score > 0.5;
-          const borderStyle = isFake ? '#ff007f' : '#39ff14'; // Crimson if suspicious, Green if safe
-
+          ctx.save();
           ctx.strokeStyle = borderStyle;
-          ctx.lineWidth = 2.5;
+          ctx.lineWidth = Math.max(2.5, canvas.width * 0.0035);
           ctx.setLineDash([]);
           ctx.strokeRect(sx, sy, sw, sh);
 
-          // Add a modern scan target corner style
-          const cornerLength = Math.min(sw, sh) * 0.15;
-          ctx.strokeStyle = borderStyle;
-          ctx.lineWidth = 4;
+          // Corner HUD markers
+          const cornerLength = Math.min(sw, sh) * 0.25;
+          ctx.lineWidth = Math.max(3.5, canvas.width * 0.005);
           
-          // Draw target corners
           // Top Left
           ctx.beginPath();
           ctx.moveTo(sx, sy + cornerLength);
@@ -152,21 +128,128 @@ export default function VisualDiagnostics({ frames, scanMode }: VisualDiagnostic
           ctx.lineTo(sx + sw, sy + sh - cornerLength);
           ctx.stroke();
 
-          // Draw label badge
-          ctx.fillStyle = borderStyle;
-          ctx.font = 'bold 10px monospace';
-          const labelText = `FACE #${index + 1}: ${isFake ? 'FAKE' : 'REAL'} (${Math.round(score * 100)}%)`;
+          // Label badge
+          const fontSize = Math.max(12, Math.min(20, Math.round(canvas.width * 0.02)));
+          const badgeHeight = fontSize + 8;
+          ctx.font = `bold ${fontSize}px monospace`;
+          const labelText = `SPLICED REGION #${index + 1}: TAMPERED`;
           const textWidth = ctx.measureText(labelText).width;
+          const badgeWidth = textWidth + 12;
+
+          const badgeY = sy >= badgeHeight + 4 ? sy - badgeHeight : sy + 4;
+          const badgeX = Math.min(Math.max(4, sx), Math.max(4, canvas.width - badgeWidth - 4));
           
-          ctx.fillRect(sx, sy - 18, textWidth + 10, 18);
+          ctx.fillStyle = borderStyle;
+          ctx.fillRect(badgeX, badgeY, badgeWidth, badgeHeight);
           ctx.fillStyle = '#070b13';
-          ctx.fillText(labelText, sx + 5, sy - 5);
-        }
+          ctx.fillText(labelText, badgeX + 6, badgeY + fontSize);
+          ctx.restore();
+        });
+      }
+      return;
+    }
+
+    // 2. Draw Heatmap (Spatially aligned with face clipping mask or full scene)
+    const hasFaces = currentFrame.bounding_boxes && currentFrame.bounding_boxes.length > 0;
+    const fullHeatmap = currentFrame.full_heatmap || currentFrame.faces?.[0]?.heatmap;
+
+    if (showHeatmap && fullHeatmap && fullHeatmap.length > 0) {
+      if (hasFaces && heatmapScope === 'face') {
+        // Spatially aligned face overlay: clip to face bounding boxes and project full canvas heatmap
+        ctx.save();
+        ctx.beginPath();
+        currentFrame.bounding_boxes.forEach((box) => {
+          const [bx, by, bw, bh] = box;
+          const pad = Math.min(bw, bh) * 0.15; // 15% soft margin for hair/jawline
+          const sx = Math.max(0, bx - pad);
+          const sy = Math.max(0, by - pad);
+          const sw = bw + pad * 2;
+          const sh = bh + pad * 2;
+          ctx.rect(sx, sy, sw, sh);
+        });
+        ctx.clip();
+        
+        // Draw the spatially aligned heatmap over the entire canvas (visible only through face clip)
+        drawHeatmapOverlay(ctx, fullHeatmap, 0, 0, canvas.width, canvas.height, opacity);
+        ctx.restore();
+      } else {
+        // Full scene heatmap overlay across entire canvas
+        drawHeatmapOverlay(ctx, fullHeatmap, 0, 0, canvas.width, canvas.height, opacity);
+      }
+    }
+
+    // 3. Draw Face Bounding Boxes & Badges accurately on top
+    if (showBoxes && hasFaces) {
+      currentFrame.bounding_boxes.forEach((box, index) => {
+        const [sx, sy, sw, sh] = box;
+
+        const faceData = currentFrame.faces?.[index];
+        const fakeProb = faceData?.confidence_score ?? 0;
+        const isFake = fakeProb > 0.5;
+        const confidencePct = isFake ? Math.round(fakeProb * 100) : Math.round((1 - fakeProb) * 100);
+        const borderStyle = isFake ? '#ff007f' : '#39ff14'; // Crimson if suspicious, Green if safe
+
+        // Outer glow & box
+        ctx.save();
+        ctx.strokeStyle = borderStyle;
+        ctx.lineWidth = Math.max(2.5, canvas.width * 0.003);
+        ctx.setLineDash([]);
+        ctx.strokeRect(sx, sy, sw, sh);
+
+        // Modern HUD scan target corner markers
+        const cornerLength = Math.min(sw, sh) * 0.20;
+        ctx.lineWidth = Math.max(3.5, canvas.width * 0.0045);
+        
+        // Top Left
+        ctx.beginPath();
+        ctx.moveTo(sx, sy + cornerLength);
+        ctx.lineTo(sx, sy);
+        ctx.lineTo(sx + cornerLength, sy);
+        ctx.stroke();
+        
+        // Top Right
+        ctx.beginPath();
+        ctx.moveTo(sx + sw - cornerLength, sy);
+        ctx.lineTo(sx + sw, sy);
+        ctx.lineTo(sx + sw, sy + cornerLength);
+        ctx.stroke();
+        
+        // Bottom Left
+        ctx.beginPath();
+        ctx.moveTo(sx, sy + sh - cornerLength);
+        ctx.lineTo(sx, sy + sh);
+        ctx.lineTo(sx + cornerLength, sy + sh);
+        ctx.stroke();
+
+        // Bottom Right
+        ctx.beginPath();
+        ctx.moveTo(sx + sw - cornerLength, sy + sh);
+        ctx.lineTo(sx + sw, sy + sh);
+        ctx.lineTo(sx + sw, sy + sh - cornerLength);
+        ctx.stroke();
+
+        // Scaled HUD Label Badge
+        const fontSize = Math.max(12, Math.min(22, Math.round(canvas.width * 0.022)));
+        const badgeHeight = fontSize + 8;
+        ctx.font = `bold ${fontSize}px monospace`;
+        const labelText = `FACE #${index + 1}: ${isFake ? 'FAKE' : 'REAL'} (${confidencePct}%)`;
+        const textWidth = ctx.measureText(labelText).width;
+        const badgeWidth = textWidth + 12;
+
+        // Clamp badge position inside visible canvas boundary
+        const badgeY = sy >= badgeHeight + 4 ? sy - badgeHeight : sy + 4;
+        const badgeX = Math.min(Math.max(4, sx), Math.max(4, canvas.width - badgeWidth - 4));
+        
+        ctx.fillStyle = borderStyle;
+        ctx.fillRect(badgeX, badgeY, badgeWidth, badgeHeight);
+        ctx.fillStyle = '#070b13';
+        ctx.fillText(labelText, badgeX + 6, badgeY + fontSize);
+        ctx.restore();
       });
     }
   };
 
-  const drawHeatmapOnFace = (
+  const drawHeatmapOverlay = (
     ctx: CanvasRenderingContext2D,
     heatmap: number[][],
     sx: number,
@@ -175,8 +258,7 @@ export default function VisualDiagnostics({ frames, scanMode }: VisualDiagnostic
     sh: number,
     alpha: number
   ) => {
-    // We render the 28x28 matrix on a small offscreen canvas to leverage browser interpolation upscaling
-    const size = 28;
+    const size = heatmap.length || 28;
     const offscreen = document.createElement('canvas');
     offscreen.width = size;
     offscreen.height = size;
@@ -188,11 +270,11 @@ export default function VisualDiagnostics({ frames, scanMode }: VisualDiagnostic
     // Convert 28x28 grid values to jet-like color spectrum
     for (let y = 0; y < size; y++) {
       for (let x = 0; x < size; x++) {
-        const val = heatmap[y]?.[x] || 0.0;
+        const val = heatmap[y]?.[x] ?? 0.0;
         const i = (y * size + x) * 4;
 
-        // Custom Jet Colormap mapping:
-        // High activations -> Crimson Red, Middle -> Yellow, Low -> Blue/Transparent
+        // Custom Jet / Thermal Colormap mapping:
+        // High activations -> Crimson Red, Middle -> Amber/Yellow, Low -> Cyan/Blue
         let r = 0, g = 0, b = 0;
         if (val > 0.75) {
           r = 255;
@@ -215,15 +297,17 @@ export default function VisualDiagnostics({ frames, scanMode }: VisualDiagnostic
         imgData.data[i] = r;
         imgData.data[i + 1] = g;
         imgData.data[i + 2] = b;
-        imgData.data[i + 3] = Math.round(val * 255); // Alpha channel proportional to activation
+        imgData.data[i + 3] = Math.round(Math.pow(val, 0.7) * 255); // Alpha channel with smooth power curve
       }
     }
     
     oCtx.putImageData(imgData, 0, 0);
 
-    // Draw onto main canvas with global alpha (opacity) over face region
+    // Draw smoothly onto canvas with bilinear interpolation across the full image area
     ctx.save();
     ctx.globalAlpha = alpha;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(offscreen, sx, sy, sw, sh);
     ctx.restore();
   };
@@ -265,25 +349,53 @@ export default function VisualDiagnostics({ frames, scanMode }: VisualDiagnostic
             {showHeatmap ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
             {scanMode === 'ela' ? 'ELA MAP' : 'HEATMAP'}
           </button>
-          
-          {scanMode === 'full' && (
+
+          {scanMode === 'ela' && currentFrame?.bounding_boxes && currentFrame.bounding_boxes.length > 0 && (
             <button
               onClick={() => setShowBoxes(!showBoxes)}
               className={`p-1.5 rounded transition-all text-xs font-mono flex items-center gap-1 ${
-                showBoxes ? 'bg-primary/20 text-primary' : 'text-gray-400 hover:text-white'
+                showBoxes ? 'bg-secondary/20 text-secondary' : 'text-gray-400 hover:text-white'
               }`}
-              title="Toggle bounding boxes"
+              title="Toggle detected anomaly bounding boxes"
             >
               {showBoxes ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-              FACE BOXES
+              SPLICED BOXES
             </button>
+          )}
+          
+          {scanMode === 'full' && (
+            <>
+              <button
+                onClick={() => setShowBoxes(!showBoxes)}
+                className={`p-1.5 rounded transition-all text-xs font-mono flex items-center gap-1 ${
+                  showBoxes ? 'bg-primary/20 text-primary' : 'text-gray-400 hover:text-white'
+                }`}
+                title="Toggle bounding boxes"
+              >
+                {showBoxes ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                FACE BOXES
+              </button>
+
+              {currentFrame?.bounding_boxes && currentFrame.bounding_boxes.length > 0 && showHeatmap && (
+                <button
+                  onClick={() => setHeatmapScope(heatmapScope === 'face' ? 'full' : 'face')}
+                  className={`p-1.5 rounded transition-all text-xs font-mono flex items-center gap-1 border border-primary/30 ${
+                    heatmapScope === 'face' ? 'bg-primary/20 text-primary' : 'bg-secondary/20 text-secondary'
+                  }`}
+                  title="Toggle between Face-targeted heatmap and Full-scene heatmap"
+                >
+                  <Scan className="w-3.5 h-3.5" />
+                  {heatmapScope === 'face' ? 'FACES ONLY' : 'FULL SCENE'}
+                </button>
+              )}
+            </>
           )}
         </div>
       </div>
 
       {/* Render Canvas Container */}
-      <div className="relative border border-white/5 rounded-lg overflow-hidden bg-black/40 flex items-center justify-center min-h-[300px]">
-        <canvas ref={canvasRef} className="max-w-full h-auto block" />
+      <div className="relative border border-white/5 rounded-lg overflow-hidden bg-black/60 flex items-center justify-center max-h-[480px] p-2">
+        <canvas ref={canvasRef} className="max-w-full max-h-[460px] w-auto h-auto object-contain rounded block shadow-2xl" />
       </div>
 
       {/* Opacity Control (Only for Grad-CAM deepfake mode) */}

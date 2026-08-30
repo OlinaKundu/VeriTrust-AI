@@ -1,85 +1,70 @@
 import os
+import subprocess
 import numpy as np
+import soundfile as sf
+import scipy.signal as signal
+import scipy.fft as fft
 from pathlib import Path
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 from app.utils.device import get_cuda_device_info
 
-HAS_AUDIO_LIBS = False
-VideoFileClip = None
-
-try:
-    import librosa
-    import soundfile as sf
-    HAS_AUDIO_LIBS = True
-except Exception as e:
-    print(f"Audio Detector: Librosa/Soundfile warning ({e})")
-
-# Flexible MoviePy v1 and v2 import support
-try:
-    try:
-        from moviepy import VideoFileClip
-    except (ImportError, AttributeError):
-        try:
-            from moviepy.editor import VideoFileClip
-        except (ImportError, AttributeError):
-            from moviepy.video.io.VideoFileClip import VideoFileClip
-except Exception as e:
-    VideoFileClip = None
-
-
-HAS_WAV2VEC2 = False
-wav2vec_processor = None
-wav2vec_model = None
-device = "cpu"
-loaded_wav2vec_failed = False
+HAS_AUDIO_MODEL = False
+audio_feature_extractor = None
+audio_classifier_model = None
+audio_device = "cpu"
+loaded_audio_model_failed = False
 
 def warmup_wav2vec2(target_device: str = "cuda:0") -> Dict[str, Any]:
     """
-    Initializes and warms up the Wav2Vec2 Acoustic Model on the GPU,
+    Initializes and warms up the MelodyMachine/Deepfake-audio-detection-V2 model on GPU,
     performing a dummy inference pass to compile CUDA kernels ahead of time.
     """
-    global HAS_WAV2VEC2, wav2vec_processor, wav2vec_model, device, loaded_wav2vec_failed
+    global HAS_AUDIO_MODEL, audio_feature_extractor, audio_classifier_model, audio_device, loaded_audio_model_failed
     try:
         import torch
-        from transformers import Wav2Vec2Processor, Wav2Vec2ForCTC
+        from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
         
         info = get_cuda_device_info()
-        device = target_device if info["cuda_available"] else "cpu"
-        model_id = "facebook/wav2vec2-base-960h"
+        audio_device = target_device if info["cuda_available"] else "cpu"
+        model_id = "MelodyMachine/Deepfake-audio-detection-V2"
         
-        print(f"[WARMUP]: Loading {model_id} onto {device}...")
-        wav2vec_processor = Wav2Vec2Processor.from_pretrained(model_id, local_files_only=False)
-        wav2vec_model = Wav2Vec2ForCTC.from_pretrained(model_id, local_files_only=False).to(device)
-        wav2vec_model.eval()
+        print(f"[WARMUP]: Loading {model_id} onto {audio_device}...")
+        audio_feature_extractor = AutoFeatureExtractor.from_pretrained(model_id, local_files_only=False)
+        audio_classifier_model = AutoModelForAudioClassification.from_pretrained(model_id, local_files_only=False).to(audio_device)
+        audio_classifier_model.eval()
         
         # Execute dummy CUDA forward pass
         if info["cuda_available"]:
             with torch.amp.autocast("cuda", enabled=True):
-                dummy_audio = torch.zeros(1, 16000, device=device)
+                dummy_input = torch.zeros(1, 16000, device=audio_device)
                 with torch.no_grad():
-                    _ = wav2vec_model(dummy_audio)
-            print(f"[WARMUP]: Wav2Vec2 CUDA kernel warm-up complete on {info['device_name']}")
+                    inputs = audio_feature_extractor(dummy_input.squeeze().cpu().numpy(), sampling_rate=16000, return_tensors="pt")
+                    inputs = {k: v.to(audio_device) for k, v in inputs.items()}
+                    _ = audio_classifier_model(**inputs)
+            print(f"[WARMUP]: Deepfake Audio Classifier CUDA kernel warm-up complete on {info['device_name']}")
 
-        HAS_WAV2VEC2 = True
+        HAS_AUDIO_MODEL = True
         return {
-            "model": wav2vec_model,
-            "processor": wav2vec_processor,
-            "device": device
+            "model": audio_classifier_model,
+            "feature_extractor": audio_feature_extractor,
+            "processor": audio_feature_extractor,
+            "device": audio_device
         }
     except Exception as e:
-        print(f"[WARMUP]: Wav2Vec2 model loading failed ({e}). Using spectral analysis fallback.")
-        loaded_wav2vec_failed = True
-        HAS_WAV2VEC2 = False
+        print(f"[WARMUP]: Audio deepfake model loading fallback ({e}). Using DSP forensics.")
+        loaded_audio_model_failed = True
+        HAS_AUDIO_MODEL = False
         return {}
 
-def init_wav2vec2_model():
-    global wav2vec_model, loaded_wav2vec_failed
-    if wav2vec_model is None and not loaded_wav2vec_failed:
+def init_audio_model():
+    global audio_classifier_model, loaded_audio_model_failed
+    if audio_classifier_model is None and not loaded_audio_model_failed:
         warmup_wav2vec2()
 
 def extract_audio_from_video(video_path: str | Path, output_audio_path: str | Path) -> bool:
     """
     Extracts the audio track from a video clip or copies directly if already an audio file.
+    Uses direct ffmpeg/imageio_ffmpeg subprocess to avoid Windows handle issues.
     """
     file_path = Path(video_path)
     suffix = file_path.suffix.lower()
@@ -93,27 +78,8 @@ def extract_audio_from_video(video_path: str | Path, output_audio_path: str | Pa
         except Exception as e:
             print(f"Direct audio copy error: {e}")
 
-    # Primary extraction via MoviePy
-    if VideoFileClip is not None:
-        try:
-            clip = VideoFileClip(str(video_path))
-            if clip.audio is not None:
-                clip.audio.write_audiofile(
-                    str(output_audio_path),
-                    fps=16000,
-                    nbytes=2,
-                    codec="pcm_s16le",
-                    verbose=False,
-                    logger=None
-                )
-                clip.close()
-                return True
-        except Exception as e:
-            pass
-
-    # Secondary extraction via imageio_ffmpeg / direct ffmpeg
+    # Primary extraction via ffmpeg
     try:
-        import subprocess
         try:
             import imageio_ffmpeg
             ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
@@ -129,28 +95,47 @@ def extract_audio_from_video(video_path: str | Path, output_audio_path: str | Pa
             str(output_audio_path)
         ]
         result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return result.returncode == 0 and os.path.exists(output_audio_path) and os.path.getsize(output_audio_path) > 0
+        if result.returncode == 0 and os.path.exists(output_audio_path) and os.path.getsize(output_audio_path) > 100:
+            return True
     except Exception as e:
-        print(f"Audio extraction fallback error: {e}")
-        return False
+        pass
+
+    # Secondary extraction via MoviePy
+    try:
+        from moviepy.editor import VideoFileClip
+        clip = VideoFileClip(str(video_path))
+        if clip.audio is not None:
+            clip.audio.write_audiofile(
+                str(output_audio_path),
+                fps=16000,
+                nbytes=2,
+                codec="pcm_s16le",
+                verbose=False,
+                logger=None
+            )
+            clip.close()
+            return True
+    except Exception:
+        pass
+
+    return False
 
 def analyze_audio(audio_path: str | Path, model_bundle: Dict[str, Any] = None) -> Dict[str, Any]:
     """
-    Analyzes audio waveform for deepfake voice cloning signatures, 16-band spectral energy,
-    and continuous temporal risk variance across time.
+    Analyzes audio waveform using GPU-accelerated HuggingFace deepfake classification
+    and Numba-free pure SciPy/PyTorch DSP spectral analysis.
     """
-    active_model = (model_bundle.get("model") if model_bundle else None) or wav2vec_model
-    active_processor = (model_bundle.get("processor") if model_bundle else None) or wav2vec_processor
-    active_device = (model_bundle.get("device") if model_bundle else None) or device
+    active_model = (model_bundle.get("model") if model_bundle else None) or audio_classifier_model
+    active_feat = (model_bundle.get("feature_extractor") if model_bundle else None) or (model_bundle.get("processor") if model_bundle else None) or audio_feature_extractor
+    active_dev = (model_bundle.get("device") if model_bundle else None) or audio_device
 
-    if active_model is None or active_processor is None:
-        init_wav2vec2_model()
-        active_model = wav2vec_model
-        active_processor = wav2vec_processor
-        active_device = device
+    if active_model is None or active_feat is None:
+        init_audio_model()
+        active_model = audio_classifier_model
+        active_feat = audio_feature_extractor
+        active_dev = audio_device
 
-    # Dynamic fallback frequencies & timeline
-    np.random.seed(42)
+    # Default baseline
     default_freqs = [0.12, 0.25, 0.45, 0.68, 0.85, 0.72, 0.60, 0.48, 0.38, 0.28, 0.22, 0.18, 0.14, 0.11, 0.08, 0.05]
     default_timeline = [0.08, 0.11, 0.09, 0.14, 0.12, 0.10, 0.09, 0.13, 0.11, 0.08, 0.10, 0.12]
 
@@ -163,100 +148,149 @@ def analyze_audio(audio_path: str | Path, model_bundle: Dict[str, Any] = None) -
         "timeline_risk": default_timeline
     }
 
-    if not HAS_AUDIO_LIBS or not os.path.exists(audio_path):
+    if not os.path.exists(audio_path):
         return results
 
     try:
-        y, sr = librosa.load(str(audio_path), sr=16000, mono=True)
-        if len(y) < 512:
+        # Load audio via soundfile (Pure SciPy/C++, 100% Numba-free)
+        data, sr = sf.read(str(audio_path))
+        if data.ndim > 1:
+            data = np.mean(data, axis=1) # Downmix to mono
+
+        # Resample to 16000Hz if needed
+        if sr != 16000:
+            num_samples = int(len(data) * 16000 / sr)
+            data = signal.resample(data, num_samples)
+            sr = 16000
+
+        data = data.astype(np.float32)
+        duration = len(data) / sr
+        if len(data) < 512:
             return results
 
-        duration = librosa.get_duration(y=y, sr=sr)
+        # 1. 16-Band Mel Spectrogram via SciPy STFT (for Dynamic Equalizer BarChart)
+        f, t, Zxx = signal.stft(data, fs=sr, nperseg=512, noverlap=256)
+        power_spec = np.abs(Zxx) ** 2
         
-        # 1. Pitch & Intonation Forensics
-        pitches, magnitudes = librosa.piptrack(y=y, sr=sr)
-        voiced_pitches = pitches[pitches > 0]
-        pitch_std = float(np.std(voiced_pitches)) if len(voiced_pitches) > 0 else 0.0
-        
-        # Natural human speech has pitch std ~ 45Hz - 180Hz
+        n_mels = 16
+        mel_points = np.linspace(0, 2595 * np.log10(1 + 8000 / 700), n_mels + 2)
+        hz_points = 700 * (10 ** (mel_points / 2595) - 1)
+        bin_points = np.floor((512 + 1) * hz_points / sr).astype(int)
+
+        fbank = np.zeros((n_mels, int(512 // 2 + 1)))
+        for m in range(1, n_mels + 1):
+            f_m_minus = bin_points[m - 1]
+            f_m = bin_points[m]
+            f_m_plus = bin_points[m + 1]
+            for k in range(f_m_minus, f_m):
+                fbank[m - 1, k] = (k - bin_points[m - 1]) / (bin_points[m] - bin_points[m - 1] + 1e-8)
+            for k in range(f_m, f_m_plus):
+                fbank[m - 1, k] = (bin_points[m + 1] - k) / (bin_points[m + 1] - bin_points[m] + 1e-8)
+
+        mel_energies = np.dot(fbank, power_spec)
+        mel_db = 10 * np.log10(np.maximum(1e-8, mel_energies))
+        band_avg = np.mean(mel_db, axis=1)
+        norm_bands = (band_avg - np.min(band_avg)) / (np.max(band_avg) - np.min(band_avg) + 1e-8)
+        freqs_chart = [float(round(b, 3)) for b in norm_bands]
+
+        # 2. Pitch Autocorrelation Forensics
+        frame_size = 512
+        hop_size = 256
+        pitches = []
+        for i in range(0, len(data) - frame_size, hop_size):
+            frame = data[i:i+frame_size]
+            if np.max(np.abs(frame)) > 0.01:
+                autocorr = signal.correlate(frame, frame, mode='full')
+                autocorr = autocorr[len(autocorr)//2:]
+                lag_min, lag_max = 32, 320 # 50Hz to 500Hz
+                if len(autocorr) > lag_max:
+                    peak_lag = lag_min + np.argmax(autocorr[lag_min:lag_max])
+                    if autocorr[peak_lag] > 0.3 * autocorr[0]:
+                        pitches.append(sr / peak_lag)
+
+        pitch_std = float(np.std(pitches)) if len(pitches) > 5 else 0.0
         pitch_anomaly = 0.05
         if pitch_std > 0:
-            if pitch_std < 25.0: # Monotone synthetic robotic voice
-                pitch_anomaly = min(0.90, (25.0 - pitch_std) / 25.0 * 0.8 + 0.1)
-            elif pitch_std > 350.0: # Chaotic splice artifacts
-                pitch_anomaly = min(0.85, (pitch_std - 350.0) / 200.0 * 0.6 + 0.2)
+            if pitch_std < 28.0: # Monotone synthetic robotic voice
+                pitch_anomaly = min(0.92, (28.0 - pitch_std) / 28.0 * 0.75 + 0.15)
+            elif pitch_std > 320.0: # Glitch/spliced artifacts
+                pitch_anomaly = min(0.88, (pitch_std - 320.0) / 180.0 * 0.6 + 0.2)
             else:
                 pitch_anomaly = 0.06
-        
-        # 2. Spectral Centroid & Dynamics
-        spec_centroid = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
-        mean_centroid = float(np.mean(spec_centroid))
-        std_centroid = float(np.std(spec_centroid))
-        spectral_var_norm = float(min(1.0, std_centroid / (mean_centroid + 1e-6) * 1.8))
 
-        # 3. 16-Band Mel Spectral Equalizer Bands (for Recharts BarChart)
-        mel_spec = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=16, fmin=40, fmax=8000)
-        mel_db = librosa.power_to_db(mel_spec, ref=np.max)
-        band_energies = np.mean(mel_db, axis=1) # 16 bands
-        # Normalize dB (-80 to 0) to [0.05, 0.98]
-        norm_freqs = (band_energies - band_energies.min()) / (band_energies.max() - band_energies.min() + 1e-8)
-        freqs_chart = [float(round(f, 3)) for f in norm_freqs]
+        # 3. Spectral Dynamics & High-Frequency Rolloff
+        high_energy = np.mean(power_spec[int(len(f)*0.55):, :])
+        low_energy = np.mean(power_spec[:int(len(f)*0.55), :])
+        spectral_var_norm = float(np.clip(high_energy / (low_energy + 1e-6) * 4.0, 0.05, 0.90))
 
-        # 4. Smooth Temporal Timeline Slices (for Recharts AreaChart)
-        # Slices audio into 12 to 24 temporal segments
+        # 4. Neural HuggingFace Deepfake Audio Classifier (MelodyMachine)
+        cloning_prob = 0.08
+        if HAS_AUDIO_MODEL and active_model is not None and active_feat is not None:
+            try:
+                import torch
+                # Feature extraction
+                inputs = active_feat(data, sampling_rate=16000, return_tensors="pt")
+                inputs = {k: v.to(active_dev) for k, v in inputs.items()}
+                
+                device_type = "cuda" if "cuda" in str(active_dev) and torch.cuda.is_available() else "cpu"
+                with torch.amp.autocast(device_type, enabled="cuda" in str(active_dev) and torch.cuda.is_available()):
+                    with torch.no_grad():
+                        outputs = active_model(**inputs)
+                        logits = outputs.logits
+                        
+                probs = torch.softmax(logits, dim=-1).cpu().numpy()[0]
+                # MelodyMachine labels: {'fake': 0, 'real': 1} or id2label lookup
+                id2label = getattr(active_model.config, "id2label", {0: "fake", 1: "real"})
+                for idx, p in enumerate(probs):
+                    lbl = str(id2label.get(idx, "")).lower()
+                    if "fake" in lbl or "synth" in lbl or "spoof" in lbl:
+                        cloning_prob = float(p)
+                        break
+                    elif "real" in lbl or "bonafide" in lbl:
+                        cloning_prob = float(1.0 - p)
+            except Exception as e:
+                print(f"Neural audio classifier inference exception ({e})")
+                cloning_prob = 0.08
+
+        # 5. Dynamic Temporal Slices (for Recharts AreaChart)
         num_slices = max(10, min(30, int(duration * 2)))
-        slice_samples = len(y) // num_slices
+        slice_len = len(data) // num_slices
         timeline_risk = []
 
         for i in range(num_slices):
-            chunk = y[i*slice_samples : (i+1)*slice_samples]
+            chunk = data[i*slice_len : (i+1)*slice_len]
             if len(chunk) < 256:
-                timeline_risk.append(0.08)
+                timeline_risk.append(round(cloning_prob, 3))
                 continue
-            chunk_mfcc = librosa.feature.mfcc(y=chunk, sr=sr, n_mfcc=13)
-            chunk_var = float(np.var(chunk_mfcc))
-            # Natural speech has high MFCC variance; flat synthetic audio has low variance
-            if chunk_var < 15.0:
-                c_risk = min(0.92, 0.65 + (15.0 - chunk_var) / 15.0 * 0.25)
+            
+            chunk_energy = float(np.mean(chunk ** 2))
+            zcr = float(np.mean(np.abs(np.diff(np.sign(chunk)))))
+            
+            # Base slice risk on global neural score with local energy modulation
+            slice_risk = cloning_prob
+            if chunk_energy < 1e-5: # Digital silence
+                slice_risk = max(slice_risk, 0.40)
+            elif zcr < 0.03 or zcr > 0.45:
+                slice_risk = min(0.98, slice_risk * 1.15 + 0.1)
             else:
-                c_risk = max(0.04, min(0.25, 20.0 / (chunk_var + 1.0)))
-            timeline_risk.append(float(round(c_risk, 3)))
-
-        # 5. Wav2Vec2 Acoustic Model Ingestion
-        cloning_prob = 0.08
-        if HAS_WAV2VEC2 and active_model is not None and active_processor is not None:
-            try:
-                import torch
-                input_values = active_processor(y, return_tensors="pt", sampling_rate=16000).input_values.to(active_device)
-                device_type = "cuda" if torch.cuda.is_available() and "cuda" in str(active_device) else "cpu"
-                with torch.amp.autocast(device_type, enabled=torch.cuda.is_available() and "cuda" in str(active_device)):
-                    with torch.no_grad():
-                        logits = active_model(input_values).logits
-                    
-                probs = torch.softmax(logits, dim=-1)
-                max_probs = torch.max(probs, dim=-1).values.cpu().numpy()[0]
-                logit_entropy = -float(np.mean(max_probs * np.log(max_probs + 1e-8)))
+                slice_risk = slice_risk * 0.95 + (0.05 if cloning_prob > 0.5 else 0.02)
                 
-                # Synthetic cloned voices exhibit abnormally low acoustic entropy (over-certain synthetic tokens)
-                if logit_entropy < 0.15:
-                    cloning_prob = float(np.clip(0.70 + (0.15 - logit_entropy) * 1.5, 0.60, 0.94))
-                else:
-                    cloning_prob = float(np.clip(0.05 + (0.35 - min(0.35, logit_entropy)) * 0.3, 0.04, 0.22))
-            except Exception as e:
-                cloning_prob = 0.09
+            timeline_risk.append(float(round(np.clip(slice_risk, 0.04, 0.98), 3)))
 
-        audio_risk = float(round((cloning_prob * 0.55) + (pitch_anomaly * 0.25) + (spectral_var_norm * 0.20), 3))
-        
+        # 6. Combined Audio Risk Score
+        audio_risk = float(round((cloning_prob * 0.70) + (pitch_anomaly * 0.15) + (spectral_var_norm * 0.15), 3))
+        if cloning_prob > 0.75:
+            audio_risk = max(audio_risk, float(cloning_prob * 0.95))
+
         return {
             "audio_risk_score": audio_risk,
-            "cloning_probability": cloning_prob,
-            "pitch_anomaly_index": float(round(pitch_anomaly, 3)),
-            "spectral_variance": float(round(spectral_var_norm, 3)),
+            "cloning_probability": round(cloning_prob, 3),
+            "pitch_anomaly_index": round(pitch_anomaly, 3),
+            "spectral_variance": round(spectral_var_norm, 3),
             "frequencies": freqs_chart,
             "timeline_risk": timeline_risk
         }
-        
-    except Exception as e:
-        print(f"Audio analysis fallback exception ({e}). Returning calibrated profile.")
-        return results
 
+    except Exception as e:
+        print(f"Audio analysis error: {e}")
+        return results

@@ -40,13 +40,14 @@ def extract_keyframes_and_faces(video_path: str | Path, max_frames: int = 10) ->
         img_bgr = cv2.imread(str(file_path))
         if img_bgr is not None:
             rgb_frame = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-            bboxes, cropped_faces = detect_faces(rgb_frame)
+            bboxes, cropped_faces, has_faces = detect_faces(rgb_frame)
             return [{
                 "frame_index": 0,
                 "timestamp": 0.0,
                 "bounding_boxes": bboxes,
                 "image": rgb_frame,
-                "faces": cropped_faces
+                "faces": cropped_faces,
+                "has_faces": has_faces
             }]
 
     cap = cv2.VideoCapture(str(video_path))
@@ -76,14 +77,15 @@ def extract_keyframes_and_faces(video_path: str | Path, max_frames: int = 10) ->
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             timestamp = frame_count / fps
             
-            bboxes, cropped_faces = detect_faces(rgb_frame)
+            bboxes, cropped_faces, has_faces = detect_faces(rgb_frame)
             
             results.append({
                 "frame_index": frame_count,
                 "timestamp": timestamp,
                 "bounding_boxes": bboxes,
                 "image": rgb_frame,
-                "faces": cropped_faces
+                "faces": cropped_faces,
+                "has_faces": has_faces
             })
             extracted_count += 1
 
@@ -92,9 +94,13 @@ def extract_keyframes_and_faces(video_path: str | Path, max_frames: int = 10) ->
     cap.release()
     return results
 
-def detect_faces(image_rgb: np.ndarray) -> Tuple[List[List[int]], List[np.ndarray]]:
+def detect_faces(image_rgb: np.ndarray) -> Tuple[List[List[int]], List[np.ndarray], bool]:
     """
-    Detects faces in an RGB image and crops them using GPU when available.
+    Detects faces in an RGB image and crops them using GPU MTCNN or Haar cascades when available.
+    Returns:
+    - bboxes: List of [x, y, w, h]
+    - cropped_faces: List of 224x224 RGB face crops
+    - has_faces: True if genuine faces were found, False otherwise
     """
     h, w, _ = image_rgb.shape
     bboxes = []
@@ -105,17 +111,26 @@ def detect_faces(image_rgb: np.ndarray) -> Tuple[List[List[int]], List[np.ndarra
             boxes, _ = mtcnn.detect(image_rgb)
             if boxes is not None:
                 for box in boxes:
-                    x1, y1, x2, y2 = [int(coord) for coord in box]
-                    x1, y1 = max(0, x1), max(0, y1)
-                    x2, y2 = min(w, x2), min(h, y2)
+                    bx1, by1, bx2, by2 = [int(coord) for coord in box]
+                    fw, fh = bx2 - bx1, by2 - by1
                     
-                    if x2 > x1 and y2 > y1:
-                        bboxes.append([x1, y1, x2 - x1, y2 - y1])
-                        face = image_rgb[y1:y2, x1:x2]
-                        face_resized = cv2.resize(face, (224, 224))
+                    # Store original detection box for UI display
+                    bboxes.append([max(0, bx1), max(0, by1), min(w - bx1, fw), min(h - by1, fh)])
+                    
+                    # Expand crop by 50% for contextual portrait analysis (hair, ears, jawline, background)
+                    pad_w = int(fw * 0.50)
+                    pad_h = int(fh * 0.50)
+                    cx1 = max(0, bx1 - pad_w)
+                    cy1 = max(0, by1 - pad_h)
+                    cx2 = min(w, bx2 + pad_w)
+                    cy2 = min(h, by2 + pad_h)
+                    
+                    if cx2 > cx1 and cy2 > cy1:
+                        face = image_rgb[cy1:cy2, cx1:cx2]
+                        face_resized = cv2.resize(face, (224, 224), interpolation=cv2.INTER_AREA)
                         cropped_faces.append(face_resized)
                 if len(bboxes) > 0:
-                    return bboxes, cropped_faces
+                    return bboxes, cropped_faces, True
         except Exception as e:
             print(f"MTCNN detection error: {e}. Falling back to OpenCV Cascade.")
 
@@ -125,21 +140,19 @@ def detect_faces(image_rgb: np.ndarray) -> Tuple[List[List[int]], List[np.ndarra
             faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
             for (x, y, fw, fh) in faces:
                 bboxes.append([int(x), int(y), int(fw), int(fh)])
-                face = image_rgb[y:y+fh, x:x+fw]
-                face_resized = cv2.resize(face, (224, 224))
+                pad_w = int(fw * 0.50)
+                pad_h = int(fh * 0.50)
+                cx1 = max(0, x - pad_w)
+                cy1 = max(0, y - pad_h)
+                cx2 = min(w, x + fw + pad_w)
+                cy2 = min(h, y + fh + pad_h)
+                face = image_rgb[cy1:cy2, cx1:cx2]
+                face_resized = cv2.resize(face, (224, 224), interpolation=cv2.INTER_AREA)
                 cropped_faces.append(face_resized)
             if len(bboxes) > 0:
-                return bboxes, cropped_faces
+                return bboxes, cropped_faces, True
         except Exception as e:
             print(f"OpenCV Cascade detection error: {e}")
 
-    cx, cy = w // 2, h // 2
-    fw, fh = int(w * 0.3), int(h * 0.3)
-    x1, y1 = cx - fw // 2, cy - fh // 2
-    bboxes.append([x1, y1, fw, fh])
-    
-    face = image_rgb[y1:y1+fh, x1:x1+fw]
-    face_resized = cv2.resize(face, (224, 224))
-    cropped_faces.append(face_resized)
-
-    return bboxes, cropped_faces
+    # No face detected in frame
+    return [], [], False

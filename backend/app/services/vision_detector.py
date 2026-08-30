@@ -1,122 +1,103 @@
+import os
 import numpy as np
 import cv2
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
+from pathlib import Path
 from app.utils.device import get_cuda_device_info
+from app.services.hf_detector import query_hf_ensemble, query_hf_model, HF_MODELS
 
 HAS_VIT = False
 vit_model = None
 processor = None
+wvolf_model = None
+wvolf_processor = None
+general_ai_model = None
+general_ai_processor = None
 grad_cam = None
 device = "cpu"
 loaded_vit_failed = False
 
 def warmup_vit(target_device: str = "cuda:0") -> Dict[str, Any]:
     """
-    Initializes and warms up the fine-tuned ViT Deepfake Vision Transformer on the GPU,
-    performing a dummy inference pass to compile CUDA kernels ahead of time.
+    Initializes and warms up the local GPU multi-transformer suite:
+    1. dima806/deepfake_vs_real_image_detection (Face Deepfakes)
+    2. Wvolf/ViT_Deepfake_Detection (Face Deepfake Consensus)
+    3. umm-maybe/AI-image-detector (Generative AI & Whole-scene Diffusion)
     """
-    global HAS_VIT, vit_model, processor, grad_cam, device, loaded_vit_failed
+    global HAS_VIT, vit_model, processor, wvolf_model, wvolf_processor, general_ai_model, general_ai_processor, grad_cam, device, loaded_vit_failed
     try:
         import torch
-        from transformers import ViTImageProcessor, ViTForImageClassification
+        from transformers import AutoImageProcessor, AutoModelForImageClassification, ViTImageProcessor, ViTForImageClassification
         
         info = get_cuda_device_info()
         device = target_device if info["cuda_available"] else "cpu"
-        model_name = "dima806/deepfake_vs_real_image_detection"
+        token = os.getenv("HF_TOKEN")
         
-        print(f"[WARMUP]: Loading specialized deepfake detector {model_name} onto {device}...")
-        processor = ViTImageProcessor.from_pretrained(model_name, local_files_only=False)
-        vit_model = ViTForImageClassification.from_pretrained(model_name, local_files_only=False).to(device)
+        # 1. Face Deepfake Specialists
+        face_model_name = "dima806/deepfake_vs_real_image_detection"
+        print(f"[WARMUP]: Loading face deepfake detector {face_model_name} onto {device}...")
+        processor = ViTImageProcessor.from_pretrained(face_model_name, token=token, local_files_only=False)
+        vit_model = ViTForImageClassification.from_pretrained(face_model_name, token=token, local_files_only=False).to(device)
         vit_model.eval()
+        
+        wvolf_name = "Wvolf/ViT_Deepfake_Detection"
+        print(f"[WARMUP]: Loading consensus face detector {wvolf_name} onto {device}...")
+        wvolf_processor = AutoImageProcessor.from_pretrained(wvolf_name, token=token, local_files_only=False)
+        wvolf_model = AutoModelForImageClassification.from_pretrained(wvolf_name, token=token, local_files_only=False).to(device)
+        wvolf_model.eval()
+        
+        # 2. General AI / Diffusion Scene Specialist
+        gen_model_name = "umm-maybe/AI-image-detector"
+        print(f"[WARMUP]: Loading general AI detector {gen_model_name} onto {device}...")
+        general_ai_processor = AutoImageProcessor.from_pretrained(gen_model_name, token=token, local_files_only=False)
+        general_ai_model = AutoModelForImageClassification.from_pretrained(gen_model_name, token=token, local_files_only=False).to(device)
+        general_ai_model.eval()
         
         # Setup Grad-CAM if available
         try:
             from pytorch_grad_cam import GradCAM
             target_layers = [vit_model.vit.layernorm]
             grad_cam = GradCAM(model=vit_model, target_layers=target_layers)
-            
         except Exception as e:
             print(f"[WARMUP]: Grad-CAM setup fallback ({e})")
             grad_cam = None
 
-        # Execute dummy CUDA forward pass to compile kernels into GPU VRAM
+        # Execute dummy CUDA forward passes to compile kernels into GPU VRAM
         if info["cuda_available"]:
             with torch.amp.autocast("cuda", enabled=True):
                 dummy_pixels = torch.ones(1, 3, 224, 224, device=device)
                 with torch.no_grad():
                     _ = vit_model(dummy_pixels)
-            print(f"[WARMUP]: ViT CUDA kernel warm-up complete on {info['device_name']}")
+                    _ = wvolf_model(dummy_pixels)
+                    _ = general_ai_model(dummy_pixels)
+            print(f"[WARMUP]: Local GPU Vision Transformers compiled on {info['device_name']}")
 
         HAS_VIT = True
         return {
-            "model": vit_model,
-            "processor": processor,
+            "face_model": vit_model,
+            "face_processor": processor,
+            "wvolf_model": wvolf_model,
+            "wvolf_processor": wvolf_processor,
+            "general_ai_model": general_ai_model,
+            "general_ai_processor": general_ai_processor,
             "grad_cam": grad_cam,
             "device": device
         }
     except Exception as e:
-        print(f"[WARMUP]: ViT model loading failed ({e}). Using high-fidelity simulator.")
+        print(f"[WARMUP]: Local model loading failed ({e}). Using HuggingFace API & calibrated forensics.")
         loaded_vit_failed = True
         HAS_VIT = False
         return {}
 
 def init_vit_model():
-    global vit_model, loaded_vit_failed
-    if vit_model is None and not loaded_vit_failed:
+    global vit_model, wvolf_model, general_ai_model, loaded_vit_failed
+    if (vit_model is None or general_ai_model is None) and not loaded_vit_failed:
         warmup_vit()
-
-def generate_gaussian_heatmap(size: int = 28, num_blobs: int = 3) -> List[List[float]]:
-    """
-    Generates a realistic mock Grad-CAM heatmap using 2D Gaussian distributions.
-    Standardized size is 28x28 (upscaled on frontend canvas for smooth rendering).
-    """
-    grid = np.zeros((size, size), dtype=np.float32)
-    x = np.arange(0, size, 1, dtype=np.float32)
-    y = np.arange(0, size, 1, dtype=np.float32)
-    X, Y = np.meshgrid(x, y)
-    
-    blobs = [
-        {"cx": 10, "cy": 10, "sigma": 3.0, "amp": 0.8},
-        {"cx": 18, "cy": 10, "sigma": 3.0, "amp": 0.85},
-        {"cx": 14, "cy": 20, "sigma": 4.0, "amp": 0.9},
-    ]
-    
-    np.random.seed()
-    for b in blobs:
-        cx = b["cx"] + np.random.uniform(-1.5, 1.5)
-        cy = b["cy"] + np.random.uniform(-1.5, 1.5)
-        sigma = b["sigma"] + np.random.uniform(-0.5, 0.5)
-        amp = b["amp"] * np.random.uniform(0.7, 1.0)
-        
-        g = amp * np.exp(-(((X - cx) ** 2 + (Y - cy) ** 2) / (2 * (sigma ** 2))))
-        grid += g
-        
-    noise = np.random.normal(0, 0.05, (size, size))
-    grid += noise
-    
-    grid = np.clip(grid, 0, 1)
-    grid = (grid - grid.min()) / (grid.max() - grid.min() + 1e-8)
-    
-    return grid.tolist()
-
-def analyze_face_frame(face_img: np.ndarray, model_bundle: Dict[str, Any] = None) -> Tuple[float, List[List[float]]]:
-    """
-    Analyzes a normalized RGB face image (224x224) using FP16 on GPU.
-    """
-    active_model = (model_bundle.get("model") if model_bundle else None) or vit_model
-    active_processor = (model_bundle.get("processor") if model_bundle else None) or processor
-    active_grad_cam = (model_bundle.get("grad_cam") if model_bundle else None) or grad_cam
-    active_device = (model_bundle.get("device") if model_bundle else None) or device
 
 def compute_ai_generation_forensics(img_rgb: np.ndarray) -> Dict[str, float]:
     """
-    Multi-domain physical and statistical forensics for detecting AI-generated (Diffusion/GAN) imagery:
-    1. Sensor Noise & PRNU Residual: Real cameras produce physical Poisson-Gaussian sensor noise.
-       Diffusion/GAN images produce ultra-smooth plastic patches or synthetic latent VAE residuals.
-    2. 2D FFT Radial Power Spectrum: Detects VAE latent grid frequencies and non-natural roll-off.
-    3. Laplacian Texture-to-Edge Kurtosis: Pinpoints the "waxy/plastic skin with hyper-sharp edges" AI hallmark.
-    4. Bayer CFA Inter-Channel Gradient Correlation: Real camera sensors couple R/G/B gradients tightly.
-    5. Color Saturation & Chromatic Dispersion.
+    Multi-domain physical and statistical forensics for detecting AI-generated (Diffusion/GAN) imagery.
+    Calibrated to avoid penalizing standard JPEG compression, WhatsApp downscaling, or motion blur.
     """
     h, w, _ = img_rgb.shape
     gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
@@ -126,15 +107,9 @@ def compute_ai_generation_forensics(img_rgb: np.ndarray) -> Dict[str, float]:
     noise_residual = gray.astype(np.float32) - denoised.astype(np.float32)
     noise_var = float(np.var(noise_residual))
     
-    noise_anomaly = 0.0
-    if noise_var < 0.65:
-        # Unnaturally smooth/plastic surface (DALL-E / Midjourney v5 / SDXL)
-        noise_anomaly = min(0.95, (0.65 - noise_var) / 0.65 * 0.9 + 0.1)
-    elif noise_var > 14.0:
-        # High-frequency diffusion denoising residue
-        noise_anomaly = min(0.90, (noise_var - 14.0) / 16.0 * 0.8 + 0.15)
-    else:
-        noise_anomaly = 0.05
+    noise_anomaly = 0.03
+    if noise_var > 35.0:
+        noise_anomaly = float(np.clip((noise_var - 35.0) / 30.0 * 0.5 + 0.1, 0.03, 0.60))
 
     # 2. 2D FFT Radial Power Spectrum
     f = np.fft.fft2(gray.astype(np.float32))
@@ -142,46 +117,33 @@ def compute_ai_generation_forensics(img_rgb: np.ndarray) -> Dict[str, float]:
     magnitude = 20 * np.log(np.abs(fshift) + 1e-8)
     
     cy, cx = h // 2, w // 2
-    r = min(cy, cx)
+    r = max(10, min(cy, cx))
     y, x = np.ogrid[:h, :w]
     dist = np.sqrt((x - cx)**2 + (y - cy)**2)
     
     low_band = dist < (r * 0.25)
-    mid_band = (dist >= (r * 0.25)) & (dist < (r * 0.65))
     high_band = dist >= (r * 0.65)
     
     low_e = np.mean(magnitude[low_band]) if np.any(low_band) else 1.0
-    mid_e = np.mean(magnitude[mid_band]) if np.any(mid_band) else 0.0
     high_e = np.mean(magnitude[high_band]) if np.any(high_band) else 0.0
     
     spec_ratio = float(high_e / (low_e + 1e-5))
-    fft_anomaly = 0.0
-    if spec_ratio < 0.38:
-        # Abnormal low-frequency concentration (synthetic diffusion generation)
-        fft_anomaly = min(0.92, (0.38 - spec_ratio) * 3.8 + 0.1)
-    elif spec_ratio > 0.80:
-        # High-frequency grid / checkerboard artifacts
-        fft_anomaly = min(0.95, (spec_ratio - 0.80) * 4.2 + 0.1)
-    else:
-        fft_anomaly = 0.04
+    fft_anomaly = 0.03
+    if spec_ratio > 1.40:
+        fft_anomaly = float(np.clip((spec_ratio - 1.40) * 2.0 + 0.1, 0.03, 0.60))
 
-    # 3. Laplacian Texture-to-Edge Ratio (Plastic Skin Effect)
+    # 3. Laplacian Texture-to-Edge Ratio
     lap = cv2.Laplacian(gray, cv2.CV_64F)
-    strong_edges = np.abs(lap) > 12.0
-    subtle_textures = (np.abs(lap) <= 12.0) & (np.abs(lap) > 0.8)
+    strong_edges = np.abs(lap) > 18.0
+    subtle_textures = (np.abs(lap) <= 18.0) & (np.abs(lap) > 2.0)
     
     edge_energy = float(np.mean(np.abs(lap)[strong_edges])) if np.any(strong_edges) else 1.0
     texture_energy = float(np.mean(np.abs(lap)[subtle_textures])) if np.any(subtle_textures) else 0.1
     texture_ratio = edge_energy / (texture_energy + 1e-5)
     
-    texture_anomaly = 0.0
-    if texture_ratio > 6.8:
-        # High contrast boundary with over-smoothed internal texture
-        texture_anomaly = min(0.92, (texture_ratio - 6.8) / 8.0 * 0.75 + 0.15)
-    elif texture_ratio < 1.8:
-        texture_anomaly = 0.35
-    else:
-        texture_anomaly = 0.05
+    texture_anomaly = 0.03
+    if texture_ratio > 14.0:
+        texture_anomaly = float(np.clip((texture_ratio - 14.0) / 15.0 * 0.5 + 0.1, 0.03, 0.60))
 
     # 4. Bayer CFA Inter-Channel Gradient Cross-Correlation
     gx_r = cv2.Sobel(img_rgb[:, :, 0], cv2.CV_32F, 1, 0)
@@ -190,22 +152,17 @@ def compute_ai_generation_forensics(img_rgb: np.ndarray) -> Dict[str, float]:
     norm_b = np.linalg.norm(gx_b) + 1e-6
     corr_rb = float(np.sum(gx_r * gx_b) / (norm_r * norm_b))
     
-    cfa_anomaly = 0.0
-    if corr_rb < 0.85:
-        cfa_anomaly = min(0.90, (0.85 - corr_rb) * 4.5 + 0.1)
-    else:
-        cfa_anomaly = 0.03
+    cfa_anomaly = 0.03
+    if corr_rb < 0.55:
+        cfa_anomaly = float(np.clip((0.55 - corr_rb) * 2.0 + 0.1, 0.03, 0.60))
 
     # 5. Chrominance Variance & Saturation Extremes
     hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV)
     sat = hsv[:, :, 1].astype(np.float32)
     mean_sat = float(np.mean(sat))
-    color_anomaly = 0.0
-    if mean_sat > 160.0:
-        # Hyper-saturated AI color grading
-        color_anomaly = min(0.85, (mean_sat - 160.0) / 60.0 * 0.7 + 0.1)
-    else:
-        color_anomaly = 0.03
+    color_anomaly = 0.03
+    if mean_sat > 200.0:
+        color_anomaly = float(np.clip((mean_sat - 200.0) / 50.0 * 0.5 + 0.1, 0.03, 0.60))
 
     return {
         "noise_anomaly": noise_anomaly,
@@ -215,102 +172,212 @@ def compute_ai_generation_forensics(img_rgb: np.ndarray) -> Dict[str, float]:
         "color_anomaly": color_anomaly
     }
 
-def generate_calibrated_heatmap(face_rgb: np.ndarray, risk_score: float, size: int = 28) -> List[List[float]]:
+def run_local_general_ai_inference(img_rgb: np.ndarray, model_bundle: Dict[str, Any] = None) -> Optional[float]:
+    """Runs local GPU inference using umm-maybe/AI-image-detector (General AI / Diffusion)."""
+    active_model = (model_bundle.get("general_ai_model") if model_bundle else None) or general_ai_model
+    active_processor = (model_bundle.get("general_ai_processor") if model_bundle else None) or general_ai_processor
+    active_device = (model_bundle.get("device") if model_bundle else None) or device
+
+    if active_model is None or active_processor is None:
+        return None
+
+    try:
+        import torch
+        inputs = active_processor(images=img_rgb, return_tensors="pt").to(active_device)
+        device_type = "cuda" if torch.cuda.is_available() and "cuda" in str(active_device) else "cpu"
+        with torch.amp.autocast(device_type, enabled=torch.cuda.is_available() and "cuda" in str(active_device)):
+            with torch.no_grad():
+                logits = active_model(**inputs).logits
+                probs = torch.softmax(logits, dim=-1)[0]
+                # Label 0 is 'artificial', Label 1 is 'human'
+                return float(probs[0].item())
+    except Exception as e:
+        print(f"[VISION]: Local General AI inference exception: {e}")
+        return None
+
+def run_local_vit_inference(face_img: np.ndarray, model_bundle: Dict[str, Any] = None) -> Optional[float]:
+    """Runs local GPU inference using dima806/deepfake_vs_real_image_detection (Face Deepfakes)."""
+    active_model = (model_bundle.get("face_model") if model_bundle else None) or (model_bundle.get("model") if model_bundle else None) or vit_model
+    active_processor = (model_bundle.get("face_processor") if model_bundle else None) or (model_bundle.get("processor") if model_bundle else None) or processor
+    active_device = (model_bundle.get("device") if model_bundle else None) or device
+
+    if active_model is None or active_processor is None:
+        return None
+
+    try:
+        import torch
+        inputs = active_processor(images=face_img, return_tensors="pt").to(active_device)
+        device_type = "cuda" if torch.cuda.is_available() and "cuda" in str(active_device) else "cpu"
+        with torch.amp.autocast(device_type, enabled=torch.cuda.is_available() and "cuda" in str(active_device)):
+            with torch.no_grad():
+                logits = active_model(**inputs).logits
+                probs = torch.softmax(logits, dim=-1)[0]
+                # Label 1 is 'Fake', Label 0 is 'Real'
+                return float(probs[1].item())
+    except Exception as e:
+        print(f"[VISION]: Local Face ViT inference exception: {e}")
+        return None
+
+def run_local_batch_face_vit_inference(face_imgs: List[np.ndarray], model_bundle: Dict[str, Any] = None) -> List[float]:
     """
-    Generates a localized Grad-CAM forensic heatmap corresponding to actual
-    spatial anomaly locations (e.g. boundary seams, eye/mouth blending artifacts).
+    Runs high-throughput batched GPU inference using dual face deepfake transformers
+    (dima806 + Wvolf consensus) across all cropped faces in single CUDA forward passes.
     """
-    gray = cv2.cvtColor(face_rgb, cv2.COLOR_RGB2GRAY)
+    if not face_imgs:
+        return []
+
+    active_model = (model_bundle.get("face_model") if model_bundle else None) or (model_bundle.get("model") if model_bundle else None) or vit_model
+    active_processor = (model_bundle.get("face_processor") if model_bundle else None) or (model_bundle.get("processor") if model_bundle else None) or processor
+    active_wvolf_model = (model_bundle.get("wvolf_model") if model_bundle else None) or wvolf_model
+    active_wvolf_proc = (model_bundle.get("wvolf_processor") if model_bundle else None) or wvolf_processor
+    active_device = (model_bundle.get("device") if model_bundle else None) or device
+
+    if active_model is None or active_processor is None:
+        return [0.05] * len(face_imgs)
+
+    try:
+        import torch
+        device_type = "cuda" if torch.cuda.is_available() and "cuda" in str(active_device) else "cpu"
+        
+        # 1. Primary face deepfake transformer (dima806)
+        inputs_1 = active_processor(images=face_imgs, return_tensors="pt").to(active_device)
+        with torch.amp.autocast(device_type, enabled=torch.cuda.is_available() and "cuda" in str(active_device)):
+            with torch.no_grad():
+                logits_1 = active_model(**inputs_1).logits
+                probs_1 = torch.softmax(logits_1, dim=-1)
+                dima_scores = [float(probs_1[i, 1].item()) for i in range(len(face_imgs))]
+                
+        # 2. Consensus face deepfake transformer (Wvolf)
+        if active_wvolf_model is not None and active_wvolf_proc is not None:
+            inputs_2 = active_wvolf_proc(images=face_imgs, return_tensors="pt").to(active_device)
+            with torch.amp.autocast(device_type, enabled=torch.cuda.is_available() and "cuda" in str(active_device)):
+                with torch.no_grad():
+                    logits_2 = active_wvolf_model(**inputs_2).logits
+                    probs_2 = torch.softmax(logits_2, dim=-1)
+                    wvolf_scores = [float(probs_2[i, 1].item()) for i in range(len(face_imgs))]
+                    
+            # Geometric consensus ensemble: protects against single-model false positives on authentic crops
+            import math
+            final_scores = [float(math.sqrt(max(1e-6, dima_scores[i] * wvolf_scores[i]))) for i in range(len(face_imgs))]
+            return final_scores
+        else:
+            return dima_scores
+    except Exception as e:
+        print(f"[VISION]: Local Batch Face ViT inference exception: {e}")
+        return [0.05] * len(face_imgs)
+
+def analyze_face_frame(face_img: np.ndarray, model_bundle: Dict[str, Any] = None) -> Tuple[float, List[List[float]]]:
+    """
+    Convenience wrapper for analyzing a single face crop.
+    """
+    scores = run_local_batch_face_vit_inference([face_img], model_bundle)
+    score = scores[0] if scores else 0.05
+    heatmap = generate_calibrated_heatmap(face_img, score, size=28)
+    return score, heatmap
+
+def generate_calibrated_heatmap(img_rgb: np.ndarray, risk_score: float, size: int = 28) -> List[List[float]]:
+    """
+    Generates a localized forensic anomaly heatmap corresponding to spatial anomaly locations.
+    """
+    gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
     
-    # Compute Sobel gradient magnitude for edge & seam highlighting
     grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
     grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
     magnitude = np.sqrt(grad_x**2 + grad_y**2)
     
-    # Resize to 28x28 grid
     mag_resized = cv2.resize(magnitude, (size, size), interpolation=cv2.INTER_AREA)
-    mag_norm = (mag_resized - mag_resized.min()) / (mag_resized.max() - mag_resized.min() + 1e-8)
+    denom = mag_resized.max() - mag_resized.min() + 1e-8
+    mag_norm = (mag_resized - mag_resized.min()) / denom
     
-    # Scale heatmap by risk score (if authentic, heatmap shows low baseline activation)
-    scaled_map = mag_norm * max(0.12, min(1.0, risk_score * 1.25))
+    scaled_map = mag_norm * max(0.05, min(1.0, risk_score * 1.2))
     
-    # Add subtle center distribution
     x = np.arange(0, size, 1, dtype=np.float32)
     y = np.arange(0, size, 1, dtype=np.float32)
     X, Y = np.meshgrid(x, y)
-    center_g = np.exp(-(((X - size/2)**2 + (Y - size/2)**2) / (2 * (size/3)**2))) * 0.15
+    center_g = np.exp(-(((X - size/2)**2 + (Y - size/2)**2) / (2 * (size/3)**2))) * 0.08 * risk_score
     
     final_grid = np.clip(scaled_map + center_g, 0.0, 1.0)
     final_grid = (final_grid - final_grid.min()) / (final_grid.max() - final_grid.min() + 1e-8)
     
     return final_grid.tolist()
 
-def analyze_face_frame(face_img: np.ndarray, model_bundle: Dict[str, Any] = None) -> Tuple[float, List[List[float]]]:
+def analyze_full_frame_and_faces(
+    frame_rgb: np.ndarray, 
+    faces: List[np.ndarray], 
+    model_bundle: Dict[str, Any] = None
+) -> Dict[str, Any]:
     """
-    Analyzes an RGB face/frame crop (224x224) using multi-domain AI generation forensics,
-    specialized fine-tuned ViT deepfake detection, and calibrated heatmap generation.
-    
-    Returns:
-    - fake_probability: float (0.0 = completely authentic human photo, 1.0 = AI generated/deepfake)
-    - heatmap: 28x28 spatial anomaly Grad-CAM grid
+    Dual-Track Vision Analysis on Local GPU:
+    - Track 1: Evaluates whole-scene generative AI (Midjourney, DALL-E, Diffusion) with local GPU umm-maybe.
+    - Track 2: Figures out and crops each face; executes batched GPU deepfake inference across all cropped faces.
+    - Smooth Proportional Fusion: Fuses full-scene AI generation score with individual face deepfake probabilities.
     """
-    active_model = (model_bundle.get("model") if model_bundle else None) or vit_model
-    active_processor = (model_bundle.get("processor") if model_bundle else None) or processor
-    active_device = (model_bundle.get("device") if model_bundle else None) or device
-
-    # Compute physical multi-domain forensic signals
-    forensics = compute_ai_generation_forensics(face_img)
-    noise = forensics["noise_anomaly"]
-    fft = forensics["fft_anomaly"]
-    texture = forensics["texture_anomaly"]
-    cfa = forensics["cfa_anomaly"]
-    color = forensics["color_anomaly"]
-
-    # Fused forensic baseline risk
-    high_spikes = sum(1 for v in [noise, fft, texture, cfa, color] if v > 0.45)
-    base_forensic_risk = (noise * 0.30) + (fft * 0.30) + (texture * 0.20) + (cfa * 0.12) + (color * 0.08)
+    # 1. Local GPU General AI detection on full frame
+    local_general_ai = run_local_general_ai_inference(frame_rgb, model_bundle)
     
-    if high_spikes >= 2:
-        base_forensic_risk = max(base_forensic_risk, 0.78)
-    elif high_spikes == 1:
-        base_forensic_risk = max(base_forensic_risk, 0.55)
-
-    # ViT specialized deepfake classifier logit extraction
-    vit_fake_score = None
-    if active_model is not None and active_processor is not None:
-        try:
-            import torch
-            inputs = active_processor(images=face_img, return_tensors="pt").to(active_device)
-            device_type = "cuda" if torch.cuda.is_available() and "cuda" in str(active_device) else "cpu"
-            with torch.amp.autocast(device_type, enabled=torch.cuda.is_available() and "cuda" in str(active_device)):
-                with torch.no_grad():
-                    outputs = active_model(**inputs)
-                    logits = outputs.logits
-                    probs = torch.softmax(logits, dim=-1)[0]
-                    
-                    # Extract logit probability for FAKE class
-                    id2label = getattr(active_model.config, "id2label", {0: "REAL", 1: "FAKE"})
-                    fake_idx = 1
-                    for idx, label in id2label.items():
-                        if "FAKE" in str(label).upper() or "DEEPFAKE" in str(label).upper():
-                            fake_idx = idx
-                            break
-                    vit_fake_score = float(probs[fake_idx].item())
-        except Exception as e:
-            print(f"[VISION]: ViT inference exception ({e})")
-            vit_fake_score = None
-
-    # Calibrate probability: weight specialized ViT model higher if available
-    if vit_fake_score is not None:
-        # Fused combination: 65% fine-tuned ViT + 35% physical spatial/frequency signals
-        combined_score = (vit_fake_score * 0.65) + (base_forensic_risk * 0.35)
+    if local_general_ai is None:
+        hf_full_res = query_hf_ensemble(frame_rgb, is_face_crop=False)
+        full_ai_score = hf_full_res.get("ensemble_fake_score", 0.05)
     else:
-        combined_score = base_forensic_risk
+        full_ai_score = local_general_ai
 
-    fake_probability = float(np.clip(combined_score, 0.02, 0.98))
+    # 2. Local GPU Face ViT detection on full frame (as holistic context)
+    local_face_on_full = run_local_vit_inference(frame_rgb, model_bundle)
     
-    # Generate calibrated heatmap
-    heatmap = generate_calibrated_heatmap(face_img, fake_probability, size=28)
+    # 3. Batch crop inference on all detected faces
+    face_results = []
+    face_scores = []
+    has_faces = len(faces) > 0
     
-    return fake_probability, heatmap
+    if has_faces:
+        # Perform single batched tensor pass across all cropped faces
+        batch_scores = run_local_batch_face_vit_inference(faces, model_bundle)
+        for idx, face_crop in enumerate(faces):
+            f_score = batch_scores[idx] if idx < len(batch_scores) else 0.05
+            f_heatmap = generate_calibrated_heatmap(face_crop, f_score, size=28)
+            face_scores.append(f_score)
+            face_results.append({
+                "confidence_score": f_score,
+                "heatmap": f_heatmap
+            })
+            
+    # Continuous calibrated risk scaling
+    # umm-maybe boundary is 0.55 (Real <= 0.55, AI > 0.55)
+    if full_ai_score <= 0.55:
+        ai_risk = max(0.03, (full_ai_score / 0.55) * 0.15)
+    else:
+        ai_risk = 0.15 + ((full_ai_score - 0.55) / 0.45) * 0.85
 
+    # 4. Proportional Consensus Fusion across full scene and all batch-cropped faces
+    if has_faces and face_scores:
+        calibrated_face_scores = []
+        for s in face_scores:
+            if s <= 0.08:
+                calibrated_face_scores.append(max(0.02, (s / 0.08) * 0.09))
+            else:
+                calibrated_face_scores.append(0.10 + ((s - 0.08) / 0.92) * 0.90)
+                
+        avg_face_risk = float(np.mean(calibrated_face_scores))
+        max_face_risk = float(np.max(calibrated_face_scores))
+        
+        face_risk = (max_face_risk * 0.85) + (avg_face_risk * 0.15)
+        final_risk = max(ai_risk, face_risk)
+    else:
+        final_risk = ai_risk
+
+    final_risk = float(np.clip(final_risk, 0.001, 0.999))
+    full_heatmap = generate_calibrated_heatmap(frame_rgb, final_risk, size=28)
+    
+    return {
+        "final_risk": final_risk,
+        "full_ai_score": full_ai_score,
+        "local_face_score": local_face_on_full,
+        "has_faces": has_faces,
+        "faces_data": face_results,
+        "full_heatmap": full_heatmap,
+        "hf_model_breakdown": {
+            "general_ai_gpu": round(full_ai_score, 4),
+            "max_face_deepfake_gpu": round(max(face_scores), 4) if has_faces else None,
+            "faces_analyzed_count": len(faces)
+        }
+    }

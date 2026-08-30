@@ -13,7 +13,7 @@ from typing import Dict, Any
 from app.utils.temp_storage import init_temp_dir, get_temp_path, cleanup_file
 from app.utils.device import get_cuda_device_info, print_hardware_summary
 from app.services.face_extractor import extract_keyframes_and_faces
-from app.services.vision_detector import analyze_face_frame, warmup_vit
+from app.services.vision_detector import analyze_face_frame, analyze_full_frame_and_faces, warmup_vit
 from app.services.audio_detector import extract_audio_from_video, analyze_audio, warmup_wav2vec2
 from app.services.document_ela import perform_ela
 from app.services.scoring import calculate_trust_score
@@ -21,8 +21,22 @@ from app.services.scoring import calculate_trust_score
 # Initialize temp dir
 init_temp_dir()
 
-# Upload cache to track uploaded files before WebSocket scans
-UPLOAD_CACHE: Dict[str, Path] = {}
+# Upload cache to track uploaded files across multiple scan runs (TTL: 30 mins)
+import time
+UPLOAD_CACHE: Dict[str, Dict[str, Any]] = {}
+
+def sweep_expired_upload_cache(ttl_seconds: int = 1800):
+    """Cleans up temp files older than ttl_seconds from UPLOAD_CACHE and disk."""
+    now = time.time()
+    expired_ids = []
+    for fid, entry in list(UPLOAD_CACHE.items()):
+        if now - entry.get("created_at", now) > ttl_seconds:
+            expired_ids.append(fid)
+            
+    for fid in expired_ids:
+        entry = UPLOAD_CACHE.pop(fid, None)
+        if entry and "path" in entry:
+            cleanup_file(entry["path"])
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -98,6 +112,7 @@ def get_hardware_status():
 
 @app.post("/api/v1/upload")
 async def upload_file(file: UploadFile = File(...)):
+    sweep_expired_upload_cache()
     suffix = Path(file.filename).suffix
     temp_path = get_temp_path(suffix)
     try:
@@ -105,7 +120,11 @@ async def upload_file(file: UploadFile = File(...)):
             shutil.copyfileobj(file.file, buffer)
         
         file_id = temp_path.stem
-        UPLOAD_CACHE[file_id] = temp_path
+        UPLOAD_CACHE[file_id] = {
+            "path": temp_path,
+            "filename": file.filename,
+            "created_at": time.time()
+        }
         
         return {
             "file_id": file_id,
@@ -138,12 +157,12 @@ async def scan_file_sync(
 async def websocket_analyze(websocket: WebSocket, file_id: str, scan_mode: str = "full"):
     await websocket.accept()
     
-    if file_id not in UPLOAD_CACHE:
-        await websocket.send_json({"error": "File ID not found in upload cache"})
+    if file_id not in UPLOAD_CACHE or not Path(UPLOAD_CACHE[file_id]["path"]).exists():
+        await websocket.send_json({"error": "File ID not found in upload cache. Please re-upload target."})
         await websocket.close()
         return
         
-    file_path = UPLOAD_CACHE[file_id]
+    file_path = UPLOAD_CACHE[file_id]["path"]
     models = getattr(app.state, "ml_models", {})
     
     try:
@@ -165,8 +184,6 @@ async def websocket_analyze(websocket: WebSocket, file_id: str, scan_mode: str =
         except:
             pass
     finally:
-        cleanup_file(file_path)
-        UPLOAD_CACHE.pop(file_id, None)
         try:
             await websocket.close()
         except:
@@ -207,21 +224,36 @@ async def run_pipeline_sync(
         audio_bundle = models.get("audio")
         
         for k in keyframes:
+            analysis = analyze_full_frame_and_faces(k["image"], k["faces"], vision_bundle)
+            frame_risk = analysis["final_risk"]
+            vision_scores.append(frame_risk)
+            spatial_anomalies.append(float(frame_risk * 0.75))
+            
             faces_data = []
-            for face_img in k["faces"]:
-                score, heatmap = analyze_face_frame(face_img, vision_bundle)
-                vision_scores.append(score)
-                spatial_anomalies.append(float(score * 0.8))
+            for idx, face_img in enumerate(k["faces"]):
+                f_info = analysis["faces_data"][idx] if idx < len(analysis["faces_data"]) else None
+                score = f_info["confidence_score"] if f_info else frame_risk
+                heatmap = f_info["heatmap"] if f_info else analysis["full_heatmap"]
                 faces_data.append({
                     "confidence_score": score,
                     "heatmap": heatmap
+                })
+            
+            # If no faces found, provide full-frame diagnostic entry
+            if not faces_data:
+                faces_data.append({
+                    "confidence_score": frame_risk,
+                    "heatmap": analysis["full_heatmap"]
                 })
             
             frame_diagnostics.append({
                 "frame_index": k["frame_index"],
                 "timestamp": round(k["timestamp"], 2),
                 "bounding_boxes": k["bounding_boxes"],
-                "faces": faces_data
+                "faces": faces_data,
+                "full_heatmap": analysis.get("full_heatmap", []),
+                "has_faces": k.get("has_faces", False),
+                "model_breakdown": analysis.get("hf_model_breakdown", {})
             })
             
         avg_vision_risk = float(np.mean(vision_scores)) if vision_scores else 0.05
@@ -298,7 +330,7 @@ async def run_full_pipeline_ws(websocket: WebSocket, file_path: Path, models: Di
     audio_bundle = models.get("audio")
 
     await websocket.send_json({
-        "status": f"Initializing CUDA FP16 pipeline on {hw_info['device_name']}...",
+        "status": f"Initializing CUDA FP16 & HuggingFace Inference on {hw_info['device_name']}...",
         "progress": 10,
         "hardware": hw_info
     })
@@ -309,7 +341,7 @@ async def run_full_pipeline_ws(websocket: WebSocket, file_path: Path, models: Di
         await websocket.send_json({"status": "Error", "error": "Could not decode video or extract frames."})
         return
 
-    await websocket.send_json({"status": "Analyzing face boundaries using warm GPU tensors...", "progress": 30})
+    await websocket.send_json({"status": "Analyzing generative AI & facial deepfake signals...", "progress": 25})
     
     vision_scores = []
     spatial_anomalies = []
@@ -317,15 +349,20 @@ async def run_full_pipeline_ws(websocket: WebSocket, file_path: Path, models: Di
     
     for idx, k in enumerate(keyframes):
         await websocket.send_json({
-            "status": f"CUDA inference on keyframe {idx+1}/{len(keyframes)}...",
-            "progress": 30 + int(((idx + 1) / len(keyframes)) * 35)
+            "status": f"Multi-modal inference on keyframe {idx+1}/{len(keyframes)}...",
+            "progress": 25 + int(((idx + 1) / len(keyframes)) * 45)
         })
         
+        analysis = analyze_full_frame_and_faces(k["image"], k["faces"], vision_bundle)
+        frame_risk = analysis["final_risk"]
+        vision_scores.append(frame_risk)
+        spatial_anomalies.append(float(frame_risk * 0.75))
+        
         faces_data = []
-        for face_img in k["faces"]:
-            score, heatmap = analyze_face_frame(face_img, vision_bundle)
-            vision_scores.append(score)
-            spatial_anomalies.append(float(score * 0.8))
+        for f_idx, face_img in enumerate(k["faces"]):
+            f_info = analysis["faces_data"][f_idx] if f_idx < len(analysis["faces_data"]) else None
+            score = f_info["confidence_score"] if f_info else frame_risk
+            heatmap = f_info["heatmap"] if f_info else analysis["full_heatmap"]
             
             _, face_buffer = cv2.imencode('.jpg', cv2.cvtColor(face_img, cv2.COLOR_RGB2BGR))
             face_b64 = f"data:image/jpeg;base64,{base64.b64encode(face_buffer).decode('utf-8')}"
@@ -339,12 +376,22 @@ async def run_full_pipeline_ws(websocket: WebSocket, file_path: Path, models: Di
         _, frame_buffer = cv2.imencode('.jpg', cv2.cvtColor(k["image"], cv2.COLOR_RGB2BGR))
         frame_b64 = f"data:image/jpeg;base64,{base64.b64encode(frame_buffer).decode('utf-8')}"
         
+        if not faces_data:
+            faces_data.append({
+                "confidence_score": frame_risk,
+                "heatmap": analysis["full_heatmap"],
+                "face_b64": None
+            })
+        
         diagnostic = {
             "frame_index": k["frame_index"],
             "timestamp": round(k["timestamp"], 2),
             "bounding_boxes": k["bounding_boxes"],
             "faces": faces_data,
-            "frame_b64": frame_b64
+            "full_heatmap": analysis.get("full_heatmap", []),
+            "frame_b64": frame_b64,
+            "has_faces": k.get("has_faces", False),
+            "model_breakdown": analysis.get("hf_model_breakdown", {})
         }
         
         frame_diagnostics.append(diagnostic)
@@ -353,11 +400,12 @@ async def run_full_pipeline_ws(websocket: WebSocket, file_path: Path, models: Di
             "telemetry": {
                 "frame_index": k["frame_index"],
                 "timestamp": round(k["timestamp"], 2),
-                "confidence_score": faces_data[0]["confidence_score"] if faces_data else 0.0,
-                "bounding_boxes": k["bounding_boxes"]
+                "confidence_score": frame_risk,
+                "bounding_boxes": k["bounding_boxes"],
+                "has_faces": k.get("has_faces", False)
             }
         })
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.15)
 
     avg_vision_risk = float(np.mean(vision_scores)) if vision_scores else 0.05
     avg_spatial_anomaly = float(np.mean(spatial_anomalies)) if spatial_anomalies else 0.05
@@ -376,7 +424,7 @@ async def run_full_pipeline_ws(websocket: WebSocket, file_path: Path, models: Di
         audio_risk = audio_details["audio_risk_score"]
         cleanup_file(temp_audio_path)
         has_audio = True
-    await asyncio.sleep(0.3)
+    await asyncio.sleep(0.2)
 
     await websocket.send_json({"status": "Finalizing fused multi-modal scoring...", "progress": 90})
     
@@ -386,7 +434,7 @@ async def run_full_pipeline_ws(websocket: WebSocket, file_path: Path, models: Di
         spatial_anomaly=avg_spatial_anomaly,
         mode="full"
     )
-    await asyncio.sleep(0.3)
+    await asyncio.sleep(0.2)
 
     await websocket.send_json({
         "status": "Complete",
