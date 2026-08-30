@@ -12,7 +12,7 @@ loaded_vit_failed = False
 
 def warmup_vit(target_device: str = "cuda:0") -> Dict[str, Any]:
     """
-    Initializes and warms up the ViT Vision Transformer on the GPU,
+    Initializes and warms up the fine-tuned ViT Deepfake Vision Transformer on the GPU,
     performing a dummy inference pass to compile CUDA kernels ahead of time.
     """
     global HAS_VIT, vit_model, processor, grad_cam, device, loaded_vit_failed
@@ -22,9 +22,9 @@ def warmup_vit(target_device: str = "cuda:0") -> Dict[str, Any]:
         
         info = get_cuda_device_info()
         device = target_device if info["cuda_available"] else "cpu"
-        model_name = "google/vit-base-patch16-224"
+        model_name = "dima806/deepfake_vs_real_image_detection"
         
-        print(f"[WARMUP]: Loading {model_name} onto {device}...")
+        print(f"[WARMUP]: Loading specialized deepfake detector {model_name} onto {device}...")
         processor = ViTImageProcessor.from_pretrained(model_name, local_files_only=False)
         vit_model = ViTForImageClassification.from_pretrained(model_name, local_files_only=False).to(device)
         vit_model.eval()
@@ -248,7 +248,7 @@ def generate_calibrated_heatmap(face_rgb: np.ndarray, risk_score: float, size: i
 def analyze_face_frame(face_img: np.ndarray, model_bundle: Dict[str, Any] = None) -> Tuple[float, List[List[float]]]:
     """
     Analyzes an RGB face/frame crop (224x224) using multi-domain AI generation forensics,
-    ViT representation embeddings, and calibrated deepfake detection.
+    specialized fine-tuned ViT deepfake detection, and calibrated heatmap generation.
     
     Returns:
     - fake_probability: float (0.0 = completely authentic human photo, 1.0 = AI generated/deepfake)
@@ -267,9 +267,7 @@ def analyze_face_frame(face_img: np.ndarray, model_bundle: Dict[str, Any] = None
     color = forensics["color_anomaly"]
 
     # Fused forensic baseline risk
-    # If any 2 forensic indicators spike high (> 0.5), dominant risk veto applies
     high_spikes = sum(1 for v in [noise, fft, texture, cfa, color] if v > 0.45)
-    
     base_forensic_risk = (noise * 0.30) + (fft * 0.30) + (texture * 0.20) + (cfa * 0.12) + (color * 0.08)
     
     if high_spikes >= 2:
@@ -277,8 +275,8 @@ def analyze_face_frame(face_img: np.ndarray, model_bundle: Dict[str, Any] = None
     elif high_spikes == 1:
         base_forensic_risk = max(base_forensic_risk, 0.55)
 
-    # Incorporate ViT vision transformer embedding dispersion if available
-    vit_dispersion_penalty = 0.0
+    # ViT specialized deepfake classifier logit extraction
+    vit_fake_score = None
     if active_model is not None and active_processor is not None:
         try:
             import torch
@@ -288,20 +286,28 @@ def analyze_face_frame(face_img: np.ndarray, model_bundle: Dict[str, Any] = None
                 with torch.no_grad():
                     outputs = active_model(**inputs)
                     logits = outputs.logits
-                    probs = torch.softmax(logits, dim=-1)
-                    entropy = float(-torch.sum(probs * torch.log(probs + 1e-8)).item())
-                    # Extremely high entropy or anomalous low entropy indicates synthetic/adversarial generation
-                    if entropy < 3.2:
-                        vit_dispersion_penalty = min(0.30, (3.2 - entropy) * 0.25)
-                    elif entropy > 6.5:
-                        vit_dispersion_penalty = min(0.30, (entropy - 6.5) * 0.25)
-        except Exception:
-            pass
+                    probs = torch.softmax(logits, dim=-1)[0]
+                    
+                    # Extract logit probability for FAKE class
+                    id2label = getattr(active_model.config, "id2label", {0: "REAL", 1: "FAKE"})
+                    fake_idx = 1
+                    for idx, label in id2label.items():
+                        if "FAKE" in str(label).upper() or "DEEPFAKE" in str(label).upper():
+                            fake_idx = idx
+                            break
+                    vit_fake_score = float(probs[fake_idx].item())
+        except Exception as e:
+            print(f"[VISION]: ViT inference exception ({e})")
+            vit_fake_score = None
 
-    # Final calibrated probability
-    # Authentic camera photos: base_forensic_risk is ~0.04 - 0.12 -> Final score: 0.05 (Authentic!)
-    # AI generated / Diffusion / Face Swaps: base_forensic_risk is ~0.70 - 0.95 -> Final score: 0.85+ (AI Generated!)
-    fake_probability = float(np.clip(base_forensic_risk + vit_dispersion_penalty, 0.04, 0.96))
+    # Calibrate probability: weight specialized ViT model higher if available
+    if vit_fake_score is not None:
+        # Fused combination: 65% fine-tuned ViT + 35% physical spatial/frequency signals
+        combined_score = (vit_fake_score * 0.65) + (base_forensic_risk * 0.35)
+    else:
+        combined_score = base_forensic_risk
+
+    fake_probability = float(np.clip(combined_score, 0.02, 0.98))
     
     # Generate calibrated heatmap
     heatmap = generate_calibrated_heatmap(face_img, fake_probability, size=28)

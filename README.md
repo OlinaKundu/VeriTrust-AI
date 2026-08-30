@@ -10,15 +10,15 @@ pinned: false
 
 # VeriTrust AI: Multi-Modal Deepfake & Document Verification Platform
 
-VeriTrust AI is a GPU-accelerated forensic platform engineered for real-time deepfake analysis and document tampering verification. Powered by a high-throughput FastAPI backend and a Next.js (App Router) dashboard, it cross-triangulates **PyTorch Vision Transformers (ViT) with Grad-CAM heatmaps**, **Wav2Vec2 acoustic voice cloning entropy**, and **JPEG Error Level Analysis (ELA)** to stream live diagnostics over WebSockets.
+VeriTrust AI is a GPU-accelerated forensic platform engineered for real-time deepfake analysis and document tampering verification. Powered by a high-throughput FastAPI backend and a Next.js (App Router) dashboard, it cross-triangulates **fine-tuned Deepfake Vision Transformers (`dima806/deepfake_vs_real_image_detection`) with Grad-CAM heatmaps**, multi-domain physical signal analysis (2D FFT frequency spectrum, PRNU sensor noise residuals, Bayer CFA correlation, edge-to-texture kurtosis), **Wav2Vec2 acoustic voice cloning entropy**, and **JPEG Error Level Analysis (ELA)** to stream live diagnostics over WebSockets.
 
 ---
 
 ## Hardware Acceleration & Lifespan Engine
 
-* **Detected GPU**: `NVIDIA GeForce RTX 3050 Laptop GPU` (CUDA 11.8)
+* **Detected GPU**: `NVIDIA GeForce RTX 3050 Laptop GPU` (CUDA 11.8 / PyTorch CUDA)
 * **Precision**: `torch.cuda.amp.autocast()` (FP16 Mixed Precision)
-* **Lifespan Warm-up**: Automatically pre-allocates and compiles `ViT` and `Wav2Vec2` models in GPU VRAM at boot to eliminate cold-start latency during live uploads.
+* **Lifespan Warm-up**: Automatically pre-allocates and compiles fine-tuned ViT Deepfake (`dima806/deepfake_vs_real_image_detection`) and `Wav2Vec2` models in GPU VRAM at boot to eliminate cold-start latency during live uploads.
 
 ---
 

@@ -44,7 +44,7 @@ export default function MetricGrid({ metrics, scanMode, deviceName, hasAudio = t
             <p className={`text-2xl font-mono font-extrabold ${getRiskColor(safeMetrics.visual_risk_pct || 0)}`}>
               {safeMetrics.visual_risk_pct?.toFixed(1) || '0.0'}%
             </p>
-            <p className="text-[10px] text-gray-500 font-medium uppercase mt-0.5">ViT GPU Anomaly</p>
+            <p className="text-[10px] text-gray-500 font-medium uppercase mt-0.5">ViT Deepfake Model</p>
           </div>
         </div>
       ) : (
